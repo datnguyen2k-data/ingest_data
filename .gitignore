@@ -1,0 +1,15 @@
+# Go
+/bin/
+/vendor/
+*.exe
+*.out
+
+# Env
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
