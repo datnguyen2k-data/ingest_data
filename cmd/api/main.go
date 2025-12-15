@@ -53,10 +53,3 @@ func main() {
 	}
 }
 
-// func main() {
-// 	cfg, err := config.Load()
-// 	if err != nil {
-// 		log.Fatalf("load config failed: %v", err)
-// 	}
-// 	log.Printf("config: %+v", cfg)
-// }

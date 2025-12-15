@@ -10,6 +10,8 @@ import (
 )
 
 func NewPool(cfg config.PostgresConfig) (*pgxpool.Pool, error) {
+	println("User:", cfg.User)
+    println("DBName:", cfg.DBName)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -31,3 +33,6 @@ func NewPool(cfg config.PostgresConfig) (*pgxpool.Pool, error) {
 
 	return pool, nil
 }
+
+
+
