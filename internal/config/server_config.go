@@ -14,6 +14,7 @@ type Config struct {
 	Server ServerConfig
 	DB     PostgresConfig
 	Kafka  KafkaConfig
+	Pancake PancakeConfig
 }
 
 type AppConfig struct {
@@ -42,8 +43,16 @@ type KafkaConfig struct {
 	ConsumerGroup string
 }
 
+type PancakeConfig struct {
+	BaseURL   string
+	APIKey    string
+	ShopID    string
+	PageSize  int
+	SleepMS   int
+}
+
 func Load() (*Config, error) {
-	_ = godotenv.Load(".env")
+	_ = godotenv.Load()
 
 	cfg := &Config{
 		App: AppConfig{
@@ -67,6 +76,13 @@ func Load() (*Config, error) {
 			Brokers:       splitAndTrim(getEnv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")),
 			OrderTopic:    getEnv("KAFKA_ORDER_TOPIC", "orders"),
 			ConsumerGroup: getEnv("KAFKA_CONSUMER_GROUP", "ingest-data"),
+		},
+		Pancake: PancakeConfig{
+			BaseURL:  getEnv("PANCAKE_BASE_URL", "https://pos.pages.fm/api/v1"),
+			APIKey:   getEnv("PANCAKE_API_KEY", ""),
+			ShopID:   getEnv("PANCAKE_SHOP_ID", ""),
+			PageSize: getEnvAsInt("PANCAKE_PAGE_SIZE", 500),
+			SleepMS:  getEnvAsInt("PANCAKE_SLEEP_MS", 1000),
 		},
 	}
 
@@ -101,6 +117,7 @@ func (c *Config) validate() error {
 	if len(c.Kafka.Brokers) == 0 {
 		return fmt.Errorf("kafka brokers is empty")
 	}
+	// Pancake có thể optional, nên không bắt buộc validate APIKey/ShopID ở đây
 	return nil
 }
 
