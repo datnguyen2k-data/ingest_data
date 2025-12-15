@@ -78,11 +78,11 @@ func Load() (*Config, error) {
 			ConsumerGroup: getEnv("KAFKA_CONSUMER_GROUP", "ingest-data"),
 		},
 		Pancake: PancakeConfig{
-			BaseURL:  getEnv("PANCAKE_BASE_URL", "https://pos.pages.fm/api/v1"),
-			APIKey:   getEnv("PANCAKE_API_KEY", ""),
-			ShopID:   getEnv("PANCAKE_SHOP_ID", ""),
-			PageSize: getEnvAsInt("PANCAKE_PAGE_SIZE", 500),
-			SleepMS:  getEnvAsInt("PANCAKE_SLEEP_MS", 1000),
+			BaseURL:  getEnv("PANCAKE_CHANDO_BASE_URL", "https://pos.pages.fm/api/v1"),
+			APIKey:   getEnv("PANCAKE_CHANDO_API_KEY", ""),
+			ShopID:   getEnv("PANCAKE_CHANDO_SHOP_ID", ""),
+			PageSize: getEnvAsInt("PANCAKE_CHANDO_PAGE_SIZE", 500),
+			SleepMS:  getEnvAsInt("PANCAKE_CHANDO_SLEEP_MS", 1000),
 		},
 	}
 
