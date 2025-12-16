@@ -27,9 +27,9 @@ func main() {
 		log.Fatal("KAFKA_BOOTSTRAP_SERVERS is empty (ví dụ: localhost:19092,localhost:29092,localhost:39092)")
 	}
 
-	log.Printf("[Config] Kafka brokers: %v", cfg.Kafka.Brokers)
-	log.Printf("[Config] Kafka topic: %s", cfg.Kafka.OrderTopic)
-	log.Printf("[Config] Pancake Shop ID: %s", cfg.Pancake.ShopID)
+	// log.Printf("[Config] Kafka brokers: %v", cfg.Kafka.Brokers)
+	// log.Printf("[Config] Kafka topic: %s", cfg.Kafka.OrderTopic)
+	// log.Printf("[Config] Pancake Shop ID: %s", cfg.Pancake.ShopID)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
