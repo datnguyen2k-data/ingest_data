@@ -42,7 +42,7 @@ type ordersResponse struct {
 	TotalPages int               `json:"total_pages"`
 }
 
-// FetchOrdersIncremental tương tự Python: lấy theo updated_at, phân trang, sleep giữa các page.
+// FetchOrdersIncremental : lấy theo updated_at, phân trang, sleep giữa các page.
 func (c *Client) FetchOrdersIncremental(
 	ctx context.Context,
 	startDate *time.Time,

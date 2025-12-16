@@ -31,8 +31,8 @@ func TestNewClient(t *testing.T) {
 func TestClient_FetchOrdersIncremental_EmptyConfig(t *testing.T) {
 	cfg := config.PancakeConfig{
 		BaseURL:  "https://pos.pages.fm/api/v1",
-		APIKey:   "", // Empty API key
-		ShopID:   "test-shop",
+		APIKey:   "ad749408d6144963b5eb8c77b396d9ee", // Empty API key
+		ShopID:   "860099906",
 		PageSize: 100,
 		SleepMS:  500,
 	}
