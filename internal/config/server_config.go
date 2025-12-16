@@ -10,10 +10,10 @@ import (
 )
 
 type Config struct {
-	App    AppConfig
-	Server ServerConfig
-	DB     PostgresConfig
-	Kafka  KafkaConfig
+	App     AppConfig
+	Server  ServerConfig
+	DB      PostgresConfig
+	Kafka   KafkaConfig
 	Pancake PancakeConfig
 }
 
@@ -44,11 +44,11 @@ type KafkaConfig struct {
 }
 
 type PancakeConfig struct {
-	BaseURL   string
-	APIKey    string
-	ShopID    string
-	PageSize  int
-	SleepMS   int
+	BaseURL  string
+	APIKey   string
+	ShopID   string
+	PageSize int
+	SleepMS  int
 }
 
 func Load() (*Config, error) {

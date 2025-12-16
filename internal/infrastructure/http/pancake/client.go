@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"ingest_data/internal/config"
@@ -83,6 +86,13 @@ func (c *Client) FetchOrdersIncremental(
 		}
 		u.RawQuery = q.Encode()
 
+		// Log URL (ẩn API key để bảo mật)
+		logURL := u.String()
+		if c.cfg.APIKey != "" {
+			logURL = strings.ReplaceAll(logURL, c.cfg.APIKey, "***")
+		}
+		log.Printf("[Pancake API] Page %d: Calling %s", page, logURL)
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("build request: %w", err)
@@ -90,23 +100,59 @@ func (c *Client) FetchOrdersIncremental(
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			log.Printf("[Pancake API] Request failed: %v", err)
 			return nil, fmt.Errorf("call pancake api: %w", err)
 		}
 
+		// Đọc response body (cần đọc trước khi check status để có thể log)
+		bodyBytes, readErr := io.ReadAll(resp.Body)
 		if resp.Body != nil {
-			defer resp.Body.Close()
+			resp.Body.Close()
 		}
 
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("pancake api status %d", resp.StatusCode)
+		// Log response status
+		log.Printf("[Pancake API] Page %d: Response status %d", page, resp.StatusCode)
+
+		// Xử lý error theo status code
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			errorMsg := fmt.Sprintf("pancake api status %d", resp.StatusCode)
+			if readErr == nil && len(bodyBytes) > 0 {
+				errorMsg = fmt.Sprintf("pancake api status %d: %s", resp.StatusCode, string(bodyBytes))
+				log.Printf("[Pancake API] Error response body: %s", string(bodyBytes))
+			}
+
+			// Phân loại lỗi
+			switch {
+			case resp.StatusCode >= 400 && resp.StatusCode < 500:
+				// 4xx: Client errors (bad request, unauthorized, not found, etc.)
+				return nil, fmt.Errorf("client error - %s", errorMsg)
+			case resp.StatusCode >= 500:
+				// 5xx: Server errors
+				return nil, fmt.Errorf("server error - %s", errorMsg)
+			default:
+				// Các status code khác (1xx, 3xx không mong đợi)
+				return nil, fmt.Errorf("unexpected status - %s", errorMsg)
+			}
+		}
+
+		// Parse response body
+		if readErr != nil {
+			return nil, fmt.Errorf("read response body: %w", readErr)
 		}
 
 		var body ordersResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		if err := json.Unmarshal(bodyBytes, &body); err != nil {
+			log.Printf("[Pancake API] Failed to decode response: %v", err)
+			log.Printf("[Pancake API] Response body: %s", string(bodyBytes))
 			return nil, fmt.Errorf("decode response: %w", err)
 		}
 
+		// Log thông tin page
+		log.Printf("[Pancake API] Page %d: received %d orders, total pages: %d",
+			page, len(body.Data), body.TotalPages)
+
 		if len(body.Data) == 0 {
+			log.Printf("[Pancake API] Page %d: no more data, stopping", page)
 			break
 		}
 
@@ -119,10 +165,12 @@ func (c *Client) FetchOrdersIncremental(
 
 		select {
 		case <-ctx.Done():
+			log.Printf("[Pancake API] Context cancelled, stopping at page %d", page)
 			return allOrders, ctx.Err()
 		case <-time.After(sleep):
 		}
 	}
 
+	log.Printf("[Pancake API] Completed: fetched %d orders from %d page(s)", len(allOrders), page-1)
 	return allOrders, nil
 }

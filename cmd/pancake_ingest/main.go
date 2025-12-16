@@ -34,8 +34,8 @@ func main() {
 	svc := app.NewService(client, producer)
 
 	end := time.Now().UTC()
-	start := end.Add(-24 * time.Hour) // bạn có thể chỉnh lại logic time ở đây
-
+	start := end.Add(-1 * time.Hour) // bạn có thể chỉnh lại logic time ở đây
+    
 	log.Printf("fetching Pancake orders from %s to %s ...", start.Format(time.RFC3339), end.Format(time.RFC3339))
 	n, err := svc.SyncIncremental(ctx, &start, &end)
 	if err != nil {
