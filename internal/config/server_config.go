@@ -13,6 +13,7 @@ type Config struct {
 	App     AppConfig
 	Server  ServerConfig
 	DB      PostgresConfig
+	VMT_WH  PostgresConfig
 	Kafka   KafkaConfig
 	Pancake PancakeConfig
 }
@@ -71,6 +72,15 @@ func Load() (*Config, error) {
 			DBName:   getEnv("POSTGRES_DB", "postgres"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 			MaxConns: getEnvAsInt("DB_MAX_CONNS", 10),
+		},
+		VMT_WH: PostgresConfig{
+			Host:     getEnv("VMT_HOST", "localhost"),
+			Port:     getEnvAsInt("VMT_PORT", 5432),
+			User:     getEnv("VMT_USER", "postgres"),
+			Password: getEnv("VMT_PASSWORD", ""),
+			DBName:   getEnv("VMT_DB", "postgres"),
+			SSLMode:  getEnv("VMT_SSLMODE", "disable"),
+			MaxConns: getEnvAsInt("VMT_MAX_CONNS", 10),
 		},
 		Kafka: KafkaConfig{
 			Brokers:       splitAndTrim(getEnv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")),
