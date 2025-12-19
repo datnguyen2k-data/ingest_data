@@ -10,12 +10,13 @@ import (
 )
 
 type Config struct {
-	App     AppConfig
-	Server  ServerConfig
-	DB      PostgresConfig
-	VMT_WH  PostgresConfig
-	Kafka   KafkaConfig
-	Pancake PancakeConfig
+	App           AppConfig
+	Server        ServerConfig
+	DB            PostgresConfig
+	VMT_WH        PostgresConfig
+	CHANDO_ECS_DB PostgresConfig
+	Kafka         KafkaConfig
+	Pancake       PancakeConfig
 }
 
 type AppConfig struct {
@@ -81,6 +82,15 @@ func Load() (*Config, error) {
 			DBName:   getEnv("VMT_DB", "postgres"),
 			SSLMode:  getEnv("VMT_SSLMODE", "disable"),
 			MaxConns: getEnvAsInt("VMT_MAX_CONNS", 10),
+		},
+		CHANDO_ECS_DB: PostgresConfig{
+			Host:     getEnv("CHANDO_ECS_HOST", "localhost"),
+			Port:     getEnvAsInt("CHANDO_ECS_PORT", 5432),
+			User:     getEnv("CHANDO_ECS_USER", "postgres"),
+			Password: getEnv("CHANDO_ECS_PASSWORD", ""),
+			DBName:   getEnv("CHANDO_ECS_DB", "postgres"),
+			SSLMode:  getEnv("CHANDO_ECS_SSLMODE", "disable"),
+			MaxConns: getEnvAsInt("CHANDO_ECS_MAX_CONNS", 10),
 		},
 		Kafka: KafkaConfig{
 			Brokers:       splitAndTrim(getEnv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")),
