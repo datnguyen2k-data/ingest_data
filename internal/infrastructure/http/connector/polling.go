@@ -139,6 +139,13 @@ func (t *PollingTask) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			// Kiểm tra cursor-based: nếu không còn dữ liệu thì dừng
+			offset := t.connector.offsetManager.GetOffset()
+			if offset.Mode == OffsetModeCursorBased && !t.connector.offsetManager.HasMoreData() {
+				// Không còn dữ liệu, dừng polling
+				return nil
+			}
+
 			records, err := t.Poll(ctx)
 			if err != nil {
 				if t.errorHandler != nil {
@@ -158,6 +165,13 @@ func (t *PollingTask) Run(ctx context.Context) error {
 				case <-ctx.Done():
 					return ctx.Err()
 				}
+			}
+
+			// Kiểm tra lại sau khi poll: nếu cursor-based và không còn dữ liệu thì dừng
+			offset = t.connector.offsetManager.GetOffset()
+			if offset.Mode == OffsetModeCursorBased && !t.connector.offsetManager.HasMoreData() {
+				// Không còn dữ liệu, dừng polling
+				return nil
 			}
 		}
 	}
@@ -191,8 +205,8 @@ func (t *PollingTask) Poll(ctx context.Context) ([]Record, error) {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
-	// Cập nhật offset
-	if err := t.updateOffset(len(records)); err != nil {
+	// Cập nhật offset (bao gồm cursor nếu là cursor-based)
+	if err := t.updateOffset(len(records), resp); err != nil {
 		return nil, fmt.Errorf("update offset: %w", err)
 	}
 
@@ -212,7 +226,7 @@ func (t *PollingTask) Poll(ctx context.Context) ([]Record, error) {
 }
 
 // updateOffset cập nhật offset sau khi poll
-func (t *PollingTask) updateOffset(recordCount int) error {
+func (t *PollingTask) updateOffset(recordCount int, resp *HTTPResponse) error {
 	offset := t.connector.offsetManager.GetOffset()
 	
 	switch offset.Mode {
@@ -220,6 +234,22 @@ func (t *PollingTask) updateOffset(recordCount int) error {
 		return t.connector.offsetManager.Increment(recordCount)
 	case OffsetModeTimestamp:
 		return t.connector.offsetManager.UpdateTimestamp(time.Now())
+	case OffsetModeCursorBased:
+		// Extract cursor từ response
+		config := t.connector.offsetManager.config
+		if config.CursorExtractor != nil {
+			cursor, hasMore, err := config.CursorExtractor(resp)
+			if err != nil {
+				return fmt.Errorf("extract cursor: %w", err)
+			}
+			return t.connector.offsetManager.UpdateCursor(cursor, hasMore)
+		}
+		// Nếu không có extractor, sử dụng default extractor
+		cursor, hasMore, err := DefaultCursorExtractor(resp)
+		if err != nil {
+			return fmt.Errorf("extract cursor: %w", err)
+		}
+		return t.connector.offsetManager.UpdateCursor(cursor, hasMore)
 	default:
 		// Không cần cập nhật cho các mode khác
 		return nil
@@ -244,6 +274,67 @@ func (t *PollingTask) SetRecordsChannel(ch chan []Record) {
 // SetErrorChannel thiết lập channel để gửi errors
 func (t *PollingTask) SetErrorChannel(ch chan error) {
 	t.errorChan = ch
+}
+
+// DefaultCursorExtractor extract cursor từ response mặc định
+// Hỗ trợ các format phổ biến:
+// - { "next_cursor": "abc123", "has_more": true }
+// - { "pagination": { "next_cursor": "abc123", "has_more": true } }
+// - { "cursor": "abc123", "has_next": true }
+func DefaultCursorExtractor(resp *HTTPResponse) (string, bool, error) {
+	var data map[string]interface{}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return "", false, fmt.Errorf("unmarshal json: %w", err)
+	}
+
+	var cursor string
+	var hasMore bool
+
+	// Thử các format phổ biến
+	// Format 1: { "next_cursor": "...", "has_more": true }
+	if c, ok := data["next_cursor"].(string); ok {
+		cursor = c
+		if hm, ok := data["has_more"].(bool); ok {
+			hasMore = hm
+		} else {
+			hasMore = cursor != "" // Nếu có cursor thì mặc định là có more
+		}
+		return cursor, hasMore, nil
+	}
+
+	// Format 2: { "pagination": { "next_cursor": "...", "has_more": true } }
+	if pagination, ok := data["pagination"].(map[string]interface{}); ok {
+		if c, ok := pagination["next_cursor"].(string); ok {
+			cursor = c
+			if hm, ok := pagination["has_more"].(bool); ok {
+				hasMore = hm
+			} else {
+				hasMore = cursor != ""
+			}
+			return cursor, hasMore, nil
+		}
+	}
+
+	// Format 3: { "cursor": "...", "has_next": true }
+	if c, ok := data["cursor"].(string); ok {
+		cursor = c
+		if hn, ok := data["has_next"].(bool); ok {
+			hasMore = hn
+		} else {
+			hasMore = cursor != ""
+		}
+		return cursor, hasMore, nil
+	}
+
+	// Format 4: { "next": "..." } (chỉ có cursor, không có has_more)
+	if c, ok := data["next"].(string); ok {
+		cursor = c
+		hasMore = cursor != ""
+		return cursor, hasMore, nil
+	}
+
+	// Không tìm thấy cursor, trả về empty và hasMore = false
+	return "", false, nil
 }
 
 // DefaultJSONResponseParser parse JSON response mặc định

@@ -47,11 +47,12 @@ type Record struct {
 }
 
 // Offset đại diện cho offset để quản lý vị trí đọc dữ liệu
-// Hỗ trợ các mode: SIMPLE_INCREMENTING, TIMESTAMP, CUSTOM
+// Hỗ trợ các mode: SIMPLE_INCREMENTING, TIMESTAMP, CUSTOM, CURSOR_BASED
 type Offset struct {
 	Mode      OffsetMode
-	Value     interface{} // int64 cho incrementing, time.Time cho timestamp, string cho custom
+	Value     interface{} // int64 cho incrementing, time.Time cho timestamp, string cho custom/cursor
 	LastCount int         // Số lượng records trong lần poll cuối
+	HasMore   bool        // Cho cursor-based: có thêm dữ liệu không
 }
 
 // OffsetMode định nghĩa các chế độ quản lý offset
@@ -61,6 +62,7 @@ const (
 	OffsetModeSimpleIncrementing OffsetMode = "SIMPLE_INCREMENTING"
 	OffsetModeTimestamp          OffsetMode = "TIMESTAMP"
 	OffsetModeCustom             OffsetMode = "CUSTOM"
+	OffsetModeCursorBased        OffsetMode = "CURSOR_BASED"
 	OffsetModeNone               OffsetMode = "NONE"
 )
 
@@ -115,6 +117,9 @@ type OffsetConfig struct {
 	Mode         OffsetMode
 	InitialValue interface{}
 	IncrementBy  int // Cho SIMPLE_INCREMENTING
+	// Cho CURSOR_BASED:
+	CursorParamName string                                    // Tên parameter để gửi cursor trong request (mặc định: "cursor")
+	CursorExtractor func(*HTTPResponse) (string, bool, error) // Hàm extract cursor từ response (cursor, hasMore, error)
 }
 
 // WebhookConfig cấu hình cho webhook connector

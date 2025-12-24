@@ -33,6 +33,9 @@ func NewOffsetManager(config OffsetConfig) *OffsetManager {
 			om.offset.Value = time.Time{}
 		case OffsetModeCustom:
 			om.offset.Value = ""
+		case OffsetModeCursorBased:
+			om.offset.Value = "" // Cursor rỗng cho lần đầu
+			om.offset.HasMore = true
 		}
 	}
 
@@ -92,9 +95,46 @@ func (om *OffsetManager) UpdateCustom(value interface{}) error {
 	return nil
 }
 
+// UpdateCursor cập nhật cursor (cho CURSOR_BASED mode)
+// cursor: cursor mới từ response
+// hasMore: có thêm dữ liệu không
+func (om *OffsetManager) UpdateCursor(cursor string, hasMore bool) error {
+	if om.config.Mode != OffsetModeCursorBased {
+		return fmt.Errorf("update cursor only supported for CURSOR_BASED mode")
+	}
+	om.offset.Value = cursor
+	om.offset.HasMore = hasMore
+	return nil
+}
+
+// GetCursor trả về cursor hiện tại (cho CURSOR_BASED mode)
+func (om *OffsetManager) GetCursor() (string, bool, error) {
+	if om.config.Mode != OffsetModeCursorBased {
+		return "", false, fmt.Errorf("get cursor only supported for CURSOR_BASED mode")
+	}
+	cursor, ok := om.offset.Value.(string)
+	if !ok {
+		return "", false, fmt.Errorf("invalid offset value type for CURSOR_BASED")
+	}
+	return cursor, om.offset.HasMore, nil
+}
+
+// HasMoreData kiểm tra còn dữ liệu không (cho CURSOR_BASED mode)
+func (om *OffsetManager) HasMoreData() bool {
+	if om.config.Mode != OffsetModeCursorBased {
+		return false
+	}
+	return om.offset.HasMore
+}
+
 // Reset reset offset về giá trị ban đầu
 func (om *OffsetManager) Reset() {
 	om.offset.Value = om.config.InitialValue
 	om.offset.LastCount = 0
-}
+	om.offset.HasMore = false
 
+	// Reset HasMore cho cursor-based
+	if om.config.Mode == OffsetModeCursorBased {
+		om.offset.HasMore = true
+	}
+}

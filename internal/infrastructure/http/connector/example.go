@@ -89,6 +89,112 @@ func ExampleHTTPPollingConnector() {
 	_ = connector.Stop(ctx)
 }
 
+// ExampleHTTPPollingConnectorWithCursor minh họa cách sử dụng HTTPPollingConnector với cursor-based pagination
+func ExampleHTTPPollingConnectorWithCursor() {
+	// Cấu hình connector với cursor-based offset
+	config := PollingConfig{
+		ConnectorConfig: ConnectorConfig{
+			ConnectorClass: "ExampleHTTPPollingConnectorWithCursor",
+			TopicName:      "orders",
+			TasksMax:       1,
+			HTTPConfig: HTTPClientConfig{
+				Timeout:            30 * time.Second,
+				MaxIdleConns:       100,
+				MaxIdleConnsPerHost: 10,
+				RetryMaxAttempts:   3,
+			},
+			OffsetConfig: OffsetConfig{
+				Mode:         OffsetModeCursorBased,
+				InitialValue: "", // Cursor rỗng cho lần đầu
+				CursorParamName: "cursor", // Tên parameter trong request
+				CursorExtractor: func(resp *HTTPResponse) (string, bool, error) {
+					// Custom extractor nếu API có format đặc biệt
+					// Ở đây sử dụng default extractor
+					return DefaultCursorExtractor(resp)
+				},
+			},
+		},
+		URL:          "https://api.example.com/orders",
+		PollInterval: 5 * time.Second,
+		RequestBuilder: func(offset Offset) (*HTTPRequest, error) {
+			// Build request với cursor
+			cursor, _, err := func() (string, bool, error) {
+				if offset.Value == nil {
+					return "", true, nil
+				}
+				c, ok := offset.Value.(string)
+				if !ok {
+					return "", false, fmt.Errorf("invalid cursor type")
+				}
+				return c, offset.HasMore, nil
+			}()
+			if err != nil {
+				return nil, err
+			}
+
+			// Build URL với cursor parameter
+			url := "https://api.example.com/orders"
+			if cursor != "" {
+				url = fmt.Sprintf("%s?cursor=%s", url, cursor)
+			}
+
+			return &HTTPRequest{
+				Method: http.MethodGet,
+				URL:    url,
+				Headers: map[string]string{
+					"Authorization": "Bearer token",
+					"Content-Type":  "application/json",
+				},
+			}, nil
+		},
+		ResponseParser: func(resp *HTTPResponse) ([]Record, error) {
+			// Parse response, có thể có format: { "data": [...], "next_cursor": "...", "has_more": true }
+			return DefaultJSONResponseParser(resp)
+		},
+		ErrorHandler: func(err error) error {
+			fmt.Printf("Error occurred: %v\n", err)
+			return nil // Return nil để tiếp tục polling
+		},
+	}
+
+	// Tạo connector
+	connector, err := NewHTTPPollingConnector(config)
+	if err != nil {
+		panic(err)
+	}
+
+	// Tạo channel để nhận records
+	recordsChan := make(chan []Record, 100)
+
+	// Set channel cho task
+	tasks := connector.GetTasks()
+	if len(tasks) > 0 {
+		tasks[0].SetRecordsChannel(recordsChan)
+	}
+
+	// Khởi động connector
+	ctx := context.Background()
+	if err := connector.Start(ctx); err != nil {
+		panic(err)
+	}
+
+	// Xử lý records
+	go func() {
+		for records := range recordsChan {
+			for _, record := range records {
+				fmt.Printf("Received record: %s\n", string(record.Value))
+				// Produce vào Kafka hoặc xử lý khác
+			}
+		}
+	}()
+
+	// Chạy cho đến khi không còn dữ liệu (hasMore = false) hoặc context bị cancel
+	<-ctx.Done()
+
+	// Dừng connector
+	_ = connector.Stop(ctx)
+}
+
 // ExampleWebhookConnector minh họa cách sử dụng WebhookConnector
 func ExampleWebhookConnector() {
 	// Cấu hình connector
