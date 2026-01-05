@@ -92,6 +92,11 @@ type HTTPClientConfig struct {
 	KeepAlive           time.Duration
 	RetryMaxAttempts    int
 	RetryBackoff        time.Duration
+	// Concurrency settings
+	MaxConcurrentRequests int           // Số lượng request đồng thời tối đa (0 = unlimited)
+	RequestQueueSize      int           // Kích thước queue cho requests (0 = unbuffered)
+	BatchSize             int           // Số lượng records trong một batch
+	BatchTimeout          time.Duration // Timeout để flush batch
 }
 
 // ConnectorConfig cấu hình chung cho connector

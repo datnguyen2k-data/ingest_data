@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 )
 
 // HTTPPollingConnector là connector để polling dữ liệu từ HTTP API
 // Dựa trên kiến trúc của Confluent HTTP Source Connector
 type HTTPPollingConnector struct {
-	config        ConnectorConfig
-	httpClient    *HTTPClient
-	offsetManager *OffsetManager
-	tasks         []*PollingTask
+	config         ConnectorConfig
+	httpClient     *HTTPClient
+	offsetManager  *OffsetManager
+	tasks          []*PollingTask
+	workerPool     *WorkerPool
+	batchProcessor *BatchProcessor
 }
 
 // PollingConfig cấu hình cho polling connector
@@ -24,6 +27,9 @@ type PollingConfig struct {
 	RequestBuilder   func(offset Offset) (*HTTPRequest, error) // Hàm để build request dựa trên offset
 	ResponseParser   func(*HTTPResponse) ([]Record, error)      // Hàm để parse response thành records
 	ErrorHandler     func(error) error                          // Hàm xử lý lỗi
+	// Concurrency settings
+	ConcurrentPolls  int           // Số lượng poll đồng thời (0 = sequential)
+	BatchProcessor   func([]Record) error // Hàm xử lý batch records (optional)
 }
 
 // NewHTTPPollingConnector tạo polling connector mới
@@ -39,11 +45,35 @@ func NewHTTPPollingConnector(config PollingConfig) (*HTTPPollingConnector, error
 		return nil, fmt.Errorf("ResponseParser is required")
 	}
 
+	// Tạo worker pool nếu có cấu hình concurrent
+	var workerPool *WorkerPool
+	if config.HTTPConfig.MaxConcurrentRequests > 0 {
+		ctx := context.Background() // Sẽ được cập nhật khi Start
+		workerPool = NewWorkerPool(ctx, config.HTTPConfig.MaxConcurrentRequests, config.HTTPConfig.RequestQueueSize)
+	}
+
+	// Tạo batch processor nếu có
+	var batchProcessor *BatchProcessor
+	if config.BatchProcessor != nil {
+		ctx := context.Background() // Sẽ được cập nhật khi Start
+		batchSize := config.HTTPConfig.BatchSize
+		if batchSize <= 0 {
+			batchSize = 100
+		}
+		batchTimeout := config.HTTPConfig.BatchTimeout
+		if batchTimeout <= 0 {
+			batchTimeout = 5 * time.Second
+		}
+		batchProcessor = NewBatchProcessor(ctx, batchSize, batchTimeout, config.BatchProcessor)
+	}
+
 	connector := &HTTPPollingConnector{
-		config:        config.ConnectorConfig,
-		httpClient:    NewHTTPClient(config.HTTPConfig),
-		offsetManager: NewOffsetManager(config.OffsetConfig),
-		tasks:         make([]*PollingTask, 0),
+		config:         config.ConnectorConfig,
+		httpClient:     NewHTTPClient(config.HTTPConfig),
+		offsetManager:  NewOffsetManager(config.OffsetConfig),
+		tasks:          make([]*PollingTask, 0),
+		workerPool:     workerPool,
+		batchProcessor: batchProcessor,
 	}
 
 	// Tạo tasks
@@ -52,7 +82,7 @@ func NewHTTPPollingConnector(config PollingConfig) (*HTTPPollingConnector, error
 		tasksMax = 1
 	}
 
-	for i := 0; i < tasksMax; i++ {
+		for i := 0; i < tasksMax; i++ {
 		task := &PollingTask{
 			id:              i,
 			connector:       connector,
@@ -63,6 +93,7 @@ func NewHTTPPollingConnector(config PollingConfig) (*HTTPPollingConnector, error
 			errorHandler:    config.ErrorHandler,
 			topicName:       config.TopicName,
 			topicPattern:    config.TopicPattern,
+			concurrentPolls: config.ConcurrentPolls,
 		}
 		connector.tasks = append(connector.tasks, task)
 	}
@@ -88,6 +119,19 @@ func (c *HTTPPollingConnector) GetConnectorClass() string {
 
 // Start khởi động connector
 func (c *HTTPPollingConnector) Start(ctx context.Context) error {
+	// Khởi động worker pool nếu có
+	if c.workerPool != nil {
+		c.workerPool.ctx, c.workerPool.cancel = context.WithCancel(ctx)
+		c.workerPool.Start()
+	}
+
+	// Khởi động batch processor nếu có
+	if c.batchProcessor != nil {
+		c.batchProcessor.ctx, c.batchProcessor.cancel = context.WithCancel(ctx)
+		c.batchProcessor.Start()
+	}
+
+	// Khởi động tasks
 	for _, task := range c.tasks {
 		go func(t *PollingTask) {
 			if err := t.Run(ctx); err != nil {
@@ -101,6 +145,16 @@ func (c *HTTPPollingConnector) Start(ctx context.Context) error {
 
 // Stop dừng connector
 func (c *HTTPPollingConnector) Stop(ctx context.Context) error {
+	// Dừng worker pool
+	if c.workerPool != nil {
+		c.workerPool.Stop()
+	}
+
+	// Dừng batch processor
+	if c.batchProcessor != nil {
+		c.batchProcessor.Stop()
+	}
+
 	// Tasks sẽ tự dừng khi context bị cancel
 	return nil
 }
@@ -112,17 +166,18 @@ func (c *HTTPPollingConnector) GetTasks() []*PollingTask {
 
 // PollingTask là task thực hiện polling
 type PollingTask struct {
-	id             int
-	connector      *HTTPPollingConnector
-	url            string
-	pollInterval   time.Duration
-	requestBuilder func(offset Offset) (*HTTPRequest, error)
-	responseParser func(*HTTPResponse) ([]Record, error)
-	errorHandler   func(error) error
-	topicName      string
-	topicPattern   string
-	recordsChan    chan []Record
-	errorChan      chan error
+	id              int
+	connector       *HTTPPollingConnector
+	url             string
+	pollInterval    time.Duration
+	requestBuilder  func(offset Offset) (*HTTPRequest, error)
+	responseParser  func(*HTTPResponse) ([]Record, error)
+	errorHandler    func(error) error
+	topicName       string
+	topicPattern    string
+	recordsChan     chan []Record
+	errorChan       chan error
+	concurrentPolls int // Số lượng poll đồng thời
 }
 
 // Run chạy polling task
@@ -131,6 +186,17 @@ func (t *PollingTask) Run(ctx context.Context) error {
 		t.pollInterval = 10 * time.Second
 	}
 
+	// Nếu có concurrent polls, sử dụng concurrent polling
+	if t.concurrentPolls > 0 {
+		return t.runConcurrent(ctx)
+	}
+
+	// Sequential polling
+	return t.runSequential(ctx)
+}
+
+// runSequential chạy polling tuần tự
+func (t *PollingTask) runSequential(ctx context.Context) error {
 	ticker := time.NewTicker(t.pollInterval)
 	defer ticker.Stop()
 
@@ -142,7 +208,6 @@ func (t *PollingTask) Run(ctx context.Context) error {
 			// Kiểm tra cursor-based: nếu không còn dữ liệu thì dừng
 			offset := t.connector.offsetManager.GetOffset()
 			if offset.Mode == OffsetModeCursorBased && !t.connector.offsetManager.HasMoreData() {
-				// Không còn dữ liệu, dừng polling
 				return nil
 			}
 
@@ -158,23 +223,120 @@ func (t *PollingTask) Run(ctx context.Context) error {
 				continue
 			}
 
-			// Gửi records đến channel nếu có
-			if t.recordsChan != nil {
-				select {
-				case t.recordsChan <- records:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
+			// Xử lý records
+			if err := t.handleRecords(records); err != nil {
+				return err
 			}
 
 			// Kiểm tra lại sau khi poll: nếu cursor-based và không còn dữ liệu thì dừng
 			offset = t.connector.offsetManager.GetOffset()
 			if offset.Mode == OffsetModeCursorBased && !t.connector.offsetManager.HasMoreData() {
-				// Không còn dữ liệu, dừng polling
 				return nil
 			}
 		}
 	}
+}
+
+// runConcurrent chạy polling đồng thời
+func (t *PollingTask) runConcurrent(ctx context.Context) error {
+	// Tạo semaphore để giới hạn số lượng concurrent polls
+	sem := make(chan struct{}, t.concurrentPolls)
+	resultChan := make(chan pollResult, t.concurrentPolls*2)
+	var wg sync.WaitGroup
+
+	ticker := time.NewTicker(t.pollInterval)
+	defer ticker.Stop()
+
+	// Goroutine để xử lý results
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case result, ok := <-resultChan:
+				if !ok {
+					return
+				}
+				if result.err != nil {
+					if t.errorHandler != nil {
+						_ = t.errorHandler(result.err)
+					}
+					continue
+				}
+				_ = t.handleRecords(result.records)
+			}
+		}
+	}()
+
+	// Main polling loop
+	for {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			close(resultChan)
+			<-done
+			return ctx.Err()
+
+		case <-ticker.C:
+			// Kiểm tra cursor-based
+			offset := t.connector.offsetManager.GetOffset()
+			if offset.Mode == OffsetModeCursorBased && !t.connector.offsetManager.HasMoreData() {
+				wg.Wait()
+				close(resultChan)
+				<-done
+				return nil
+			}
+
+			// Acquire semaphore
+			select {
+			case sem <- struct{}{}:
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					defer func() { <-sem }()
+
+					records, err := t.Poll(ctx)
+					select {
+					case resultChan <- pollResult{records: records, err: err}:
+					case <-ctx.Done():
+					}
+				}()
+			case <-ctx.Done():
+				wg.Wait()
+				close(resultChan)
+				<-done
+				return ctx.Err()
+			}
+		}
+	}
+}
+
+// pollResult kết quả của một lần poll
+type pollResult struct {
+	records []Record
+	err     error
+}
+
+// handleRecords xử lý records (gửi vào channel hoặc batch processor)
+func (t *PollingTask) handleRecords(records []Record) error {
+	// Gửi vào batch processor nếu có
+	if t.connector.batchProcessor != nil {
+		return t.connector.batchProcessor.SubmitBatch(records)
+	}
+
+	// Gửi vào channel nếu có
+	if t.recordsChan != nil {
+		select {
+		case t.recordsChan <- records:
+			return nil
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("timeout sending records to channel")
+		}
+	}
+
+	return nil
 }
 
 // Poll thực hiện một lần polling
@@ -188,7 +350,7 @@ func (t *PollingTask) Poll(ctx context.Context) ([]Record, error) {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
-	// Thực hiện HTTP request
+	// Thực hiện HTTP request (worker pool được sử dụng ở level cao hơn nếu cần)
 	resp, err := t.connector.httpClient.Do(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %w", err)

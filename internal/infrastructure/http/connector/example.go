@@ -195,6 +195,81 @@ func ExampleHTTPPollingConnectorWithCursor() {
 	_ = connector.Stop(ctx)
 }
 
+// ExampleHTTPPollingConnectorWithConcurrency minh họa cách sử dụng HTTPPollingConnector với concurrent polling và batch processing
+func ExampleHTTPPollingConnectorWithConcurrency() {
+	// Cấu hình connector với concurrent polling và batch processing
+	config := PollingConfig{
+		ConnectorConfig: ConnectorConfig{
+			ConnectorClass: "ExampleHTTPPollingConnectorWithConcurrency",
+			TopicName:      "orders",
+			TasksMax:       1,
+			HTTPConfig: HTTPClientConfig{
+				Timeout:               30 * time.Second,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
+				RetryMaxAttempts:      3,
+				MaxConcurrentRequests: 10,  // Cho phép 10 requests đồng thời
+				RequestQueueSize:      100, // Queue size cho requests
+				BatchSize:             50,  // Batch 50 records
+				BatchTimeout:          2 * time.Second, // Flush batch sau 2 giây
+			},
+			OffsetConfig: OffsetConfig{
+				Mode:         OffsetModeSimpleIncrementing,
+				InitialValue: int64(0),
+				IncrementBy:  1,
+			},
+		},
+		URL:            "https://api.example.com/orders",
+		PollInterval:   5 * time.Second,
+		ConcurrentPolls: 5, // 5 polls đồng thời
+		RequestBuilder: func(offset Offset) (*HTTPRequest, error) {
+			offsetValue := offset.Value.(int64)
+			url := fmt.Sprintf("https://api.example.com/orders?offset=%d&limit=100", offsetValue)
+			
+			return &HTTPRequest{
+				Method: http.MethodGet,
+				URL:    url,
+				Headers: map[string]string{
+					"Authorization": "Bearer token",
+					"Content-Type":  "application/json",
+				},
+			}, nil
+		},
+		ResponseParser: DefaultJSONResponseParser,
+		ErrorHandler: func(err error) error {
+			fmt.Printf("Error occurred: %v\n", err)
+			return nil
+		},
+		// Batch processor để xử lý records theo batch
+		BatchProcessor: func(records []Record) error {
+			fmt.Printf("Processing batch of %d records\n", len(records))
+			// Produce vào Kafka hoặc xử lý batch
+			for _, record := range records {
+				_ = record // Xử lý record
+			}
+			return nil
+		},
+	}
+
+	// Tạo connector
+	connector, err := NewHTTPPollingConnector(config)
+	if err != nil {
+		panic(err)
+	}
+
+	// Khởi động connector
+	ctx := context.Background()
+	if err := connector.Start(ctx); err != nil {
+		panic(err)
+	}
+
+	// Chạy trong 5 phút
+	time.Sleep(5 * time.Minute)
+
+	// Dừng connector
+	_ = connector.Stop(ctx)
+}
+
 // ExampleWebhookConnector minh họa cách sử dụng WebhookConnector
 func ExampleWebhookConnector() {
 	// Cấu hình connector
