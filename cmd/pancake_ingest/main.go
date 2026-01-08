@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"log"
 	"time"
 
 	app "ingest_data/internal/application/pancake"
 	"ingest_data/internal/config"
 	httpPancake "ingest_data/internal/infrastructure/http/pancake"
 	kafkaInfra "ingest_data/internal/infrastructure/messaging/kafka"
+	"ingest_data/pkg/logger"
 )
 
 // Chương trình nhỏ để fetch orders từ Pancake và đẩy vào Kafka topic pancake_chando_sale_order.
@@ -16,8 +16,16 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("load config failed: %v", err)
+		// Fallback logger nếu chưa khởi tạo được
+		panic("load config failed: " + err.Error())
 	}
+
+	// Khởi tạo logger với DI
+	log, err := logger.NewZapLogger(cfg.App.Env)
+	if err != nil {
+		panic("initialize logger failed: " + err.Error())
+	}
+	defer log.Sync()
 
 	// Validate Kafka config
 	if cfg.Kafka.OrderTopic == "" {
@@ -27,20 +35,23 @@ func main() {
 		log.Fatal("KAFKA_BOOTSTRAP_SERVERS is empty (ví dụ: localhost:19092,localhost:29092,localhost:39092)")
 	}
 
-	// log.Printf("[Config] Kafka brokers: %v", cfg.Kafka.Brokers)
-	// log.Printf("[Config] Kafka topic: %s", cfg.Kafka.OrderTopic)
-	// log.Printf("[Config] Pancake Shop ID: %s", cfg.Pancake.ShopID)
+	log.Info("Starting Pancake ingestion service",
+		logger.String("app_name", cfg.App.Name),
+		logger.String("env", cfg.App.Env),
+		logger.Any("kafka_brokers", cfg.Kafka.Brokers),
+		logger.String("kafka_topic", cfg.Kafka.OrderTopic),
+		logger.String("pancake_shop_id", cfg.Pancake.ShopID))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client := httpPancake.NewClient(cfg.Pancake)
-
-	log.Printf("[Kafka] Initializing producer...")
-	producer := kafkaInfra.NewOrderProducer(cfg.Kafka)
+	// Inject logger vào các dependencies (DI)
+	client := httpPancake.NewClient(cfg.Pancake, log)
+	producer := kafkaInfra.NewOrderProducer(cfg.Kafka, log)
 	defer func() {
-		log.Printf("[Kafka] Closing producer...")
-		producer.Close(ctx)
+		if err := producer.Close(ctx); err != nil {
+			log.Error("Failed to close Kafka producer", logger.Error(err))
+		}
 	}()
 
 	svc := app.NewService(client, producer)
@@ -48,12 +59,18 @@ func main() {
 	end := time.Now().UTC()
 	start := end.Add(-1 * time.Hour) // bạn có thể chỉnh lại logic time ở đây
 
-	log.Printf("[Main] Fetching Pancake orders from %s to %s ...", start.Format(time.RFC3339), end.Format(time.RFC3339))
+	log.Info("Fetching Pancake orders",
+		logger.String("start_time", start.Format(time.RFC3339)),
+		logger.String("end_time", end.Format(time.RFC3339)))
 
 	n, err := svc.SyncIncremental(ctx, &start, &end)
 	if err != nil {
-		log.Fatalf("[Main] Sync incremental failed: %v", err)
+		log.Fatal("Sync incremental failed",
+			logger.Error(err),
+			logger.Int("synced_count", n))
 	}
 
-	log.Printf("[Main] Successfully synced %d orders to Kafka topic %s", n, cfg.Kafka.OrderTopic)
+	log.Info("Successfully synced orders to Kafka",
+		logger.Int("total_orders", n),
+		logger.String("topic", cfg.Kafka.OrderTopic))
 }

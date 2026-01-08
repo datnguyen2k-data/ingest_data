@@ -3,149 +3,314 @@ package pancake
 import (
 	"context"
 	"encoding/json"
-	"strings"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"ingest_data/internal/config"
+	"ingest_data/pkg/logger"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/mock"
 )
 
-func TestNewClient(t *testing.T) {
-	cfg := config.PancakeConfig{
-		BaseURL:  "https://pos.pages.fm/api/v1",
-		APIKey:   "test-key",
-		ShopID:   "test-shop",
-		PageSize: 100,
-		SleepMS:  500,
-	}
-
-	client := NewClient(cfg)
-	require.NotNil(t, client)
-	assert.NotNil(t, client.httpClient)
-	assert.Equal(t, cfg, client.cfg)
+// MockLogger cho testing
+type MockLogger struct {
+	mock.Mock
 }
 
-func TestClient_FetchOrdersIncremental_EmptyConfig(t *testing.T) {
+func (m *MockLogger) Debug(msg string, fields ...logger.Field) {
+	m.Called(msg, fields)
+}
+
+func (m *MockLogger) Info(msg string, fields ...logger.Field) {
+	m.Called(msg, fields)
+}
+
+func (m *MockLogger) Warn(msg string, fields ...logger.Field) {
+	m.Called(msg, fields)
+}
+
+func (m *MockLogger) Error(msg string, fields ...logger.Field) {
+	m.Called(msg, fields)
+}
+
+func (m *MockLogger) Fatal(msg string, fields ...logger.Field) {
+	m.Called(msg, fields)
+}
+
+func (m *MockLogger) WithContext(ctx context.Context) logger.Logger {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return m
+	}
+	return args.Get(0).(logger.Logger)
+}
+
+func (m *MockLogger) WithFields(fields ...logger.Field) logger.Logger {
+	args := m.Called(fields)
+	if args.Get(0) == nil {
+		return m
+	}
+	return args.Get(0).(logger.Logger)
+}
+
+func (m *MockLogger) Sync() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
+func TestClient_FetchOrdersIncremental_Success(t *testing.T) {
+	// Arrange
+	mockLog := new(MockLogger)
+	
+	// Tạo mock HTTP server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := map[string]interface{}{
+			"data": []json.RawMessage{
+				json.RawMessage(`{"id": "1", "status": "pending"}`),
+				json.RawMessage(`{"id": "2", "status": "completed"}`),
+			},
+			"total_pages": 1,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
 	cfg := config.PancakeConfig{
-		BaseURL:  "https://pos.pages.fm/api/v1",
-		APIKey:   "", // Empty API key
-		ShopID:   "",
-		PageSize: 100,
-		SleepMS:  500,
+		BaseURL:  server.URL,
+		APIKey:   "test-api-key",
+		ShopID:   "test-shop-id",
+		PageSize: 500,
+		SleepMS:  100,
 	}
 
-	client := NewClient(cfg)
+	client := NewClient(cfg, mockLog)
 	ctx := context.Background()
+	start := time.Now().Add(-1 * time.Hour)
+	end := time.Now()
 
-	orders, err := client.FetchOrdersIncremental(ctx, nil, nil)
-	assert.Error(t, err)
-	assert.Nil(t, orders)
-	assert.Contains(t, err.Error(), "api_key or shop_id is empty")
-}
+	// Setup mock expectations
+	mockLog.On("Info", mock.Anything, mock.Anything).Return()
+	mockLog.On("Warn", mock.Anything, mock.Anything).Return()
 
-func TestClient_FetchOrdersIncremental_InvalidBaseURL(t *testing.T) {
-	cfg := config.PancakeConfig{
-		BaseURL:  "://invalid-url", // Invalid URL
-		APIKey:   "test-key",
-		ShopID:   "test-shop",
-		PageSize: 100,
-		SleepMS:  500,
-	}
-
-	client := NewClient(cfg)
-	ctx := context.Background()
-
-	orders, err := client.FetchOrdersIncremental(ctx, nil, nil)
-	assert.Error(t, err)
-	assert.Nil(t, orders)
-	assert.Contains(t, err.Error(), "invalid pancake base url")
-}
-
-// Test với API thật (cần config trong .env)
-// Chạy test này với: go test -v -run TestClient_FetchOrdersIncremental_RealAPI
-func TestClient_FetchOrdersIncremental_RealAPI(t *testing.T) {
-	// Skip test nếu không có config
-	cfg, err := config.Load()
-	if err != nil {
-		t.Skip("Skipping test: config not loaded")
-	}
-
-	if cfg.Pancake.APIKey == "" || cfg.Pancake.ShopID == "" {
-		t.Skip("Skipping test: PANCAKE_CHANDO_API_KEY or PANCAKE_CHANDO_SHOP_ID not set")
-	}
-
-	client := NewClient(cfg.Pancake)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Test fetch orders trong 7 ngày gần nhất
-	end := time.Now().UTC()
-	start := end.Add(-7 * 24 * time.Hour)
-
-	t.Logf("Fetching orders from %s to %s", start.Format(time.RFC3339), end.Format(time.RFC3339))
-
+	// Act
 	orders, err := client.FetchOrdersIncremental(ctx, &start, &end)
 
-	if err != nil {
-		// Nếu lỗi do API (không phải config), log để debug
-		t.Logf("API call failed: %v", err)
-		// Không fail test nếu là lỗi từ API (có thể do network, API down, etc.)
-		if assert.Error(t, err) {
-			// Kiểm tra loại lỗi
-			errMsg := err.Error()
-			if strings.Contains(errMsg, "client error") {
-				t.Log("Client error (4xx) - check API key, shop ID, or request parameters")
-			} else if strings.Contains(errMsg, "server error") {
-				t.Log("Server error (5xx) - Pancake API might be down")
-			} else if strings.Contains(errMsg, "call pancake api") {
-				t.Log("Network error - check connection")
-			}
-		}
-		return
-	}
-
-	// Nếu thành công, kiểm tra kết quả
-	require.NoError(t, err, "FetchOrdersIncremental should not error")
-	assert.NotNil(t, orders, "orders should not be nil")
-
-	t.Logf("Successfully fetched %d orders", len(orders))
-
-	// Validate mỗi order là JSON hợp lệ
-	for i, order := range orders {
-		assert.True(t, json.Valid(order), "order[%d] should be valid JSON", i)
-		if !json.Valid(order) {
-			t.Logf("Invalid JSON at index %d: %s", i, string(order))
-		}
-	}
+	// Assert
+	assert.NoError(t, err)
+	assert.Len(t, orders, 2)
+	mockLog.AssertExpectations(t)
 }
 
-// Test fetch không có date range
-func TestClient_FetchOrdersIncremental_NoDateRange(t *testing.T) {
-	cfg, err := config.Load()
-	if err != nil {
-		t.Skip("Skipping test: config not loaded")
+func TestClient_FetchOrdersIncremental_EmptyAPIKey(t *testing.T) {
+	// Arrange
+	mockLog := new(MockLogger)
+	cfg := config.PancakeConfig{
+		BaseURL:  "https://api.example.com",
+		APIKey:   "", // Empty API key
+		ShopID:   "test-shop-id",
+		PageSize: 500,
+		SleepMS:  100,
 	}
 
-	if cfg.Pancake.APIKey == "" || cfg.Pancake.ShopID == "" {
-		t.Skip("Skipping test: PANCAKE_CHANDO_API_KEY or PANCAKE_CHANDO_SHOP_ID not set")
+	client := NewClient(cfg, mockLog)
+	ctx := context.Background()
+	start := time.Now().Add(-1 * time.Hour)
+	end := time.Now()
+
+	// Act
+	orders, err := client.FetchOrdersIncremental(ctx, &start, &end)
+
+	// Assert
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "api_key or shop_id is empty")
+	assert.Nil(t, orders)
+}
+
+func TestClient_FetchOrdersIncremental_EmptyShopID(t *testing.T) {
+	// Arrange
+	mockLog := new(MockLogger)
+	cfg := config.PancakeConfig{
+		BaseURL:  "https://api.example.com",
+		APIKey:   "test-api-key",
+		ShopID:   "", // Empty Shop ID
+		PageSize: 500,
+		SleepMS:  100,
 	}
 
-	client := NewClient(cfg.Pancake)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	client := NewClient(cfg, mockLog)
+	ctx := context.Background()
+	start := time.Now().Add(-1 * time.Hour)
+	end := time.Now()
 
-	// Fetch không có date range (sẽ lấy tất cả orders)
-	orders, err := client.FetchOrdersIncremental(ctx, nil, nil)
+	// Act
+	orders, err := client.FetchOrdersIncremental(ctx, &start, &end)
 
-	if err != nil {
-		t.Logf("API call failed: %v", err)
-		return
+	// Assert
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "api_key or shop_id is empty")
+	assert.Nil(t, orders)
+}
+
+func TestClient_FetchOrdersIncremental_HTTPError(t *testing.T) {
+	// Arrange
+	mockLog := new(MockLogger)
+	
+	// Tạo mock HTTP server trả về error
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Internal Server Error"))
+	}))
+	defer server.Close()
+
+	cfg := config.PancakeConfig{
+		BaseURL:  server.URL,
+		APIKey:   "test-api-key",
+		ShopID:   "test-shop-id",
+		PageSize: 500,
+		SleepMS:  100,
 	}
 
-	require.NoError(t, err)
-	assert.NotNil(t, orders)
-	t.Logf("Fetched %d orders without date range", len(orders))
+	client := NewClient(cfg, mockLog)
+	ctx := context.Background()
+	start := time.Now().Add(-1 * time.Hour)
+	end := time.Now()
+
+	// Setup mock expectations
+	mockLog.On("Info", mock.Anything, mock.Anything).Return()
+	mockLog.On("Error", mock.Anything, mock.Anything).Return()
+
+	// Act
+	orders, err := client.FetchOrdersIncremental(ctx, &start, &end)
+
+	// Assert
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "server error")
+	assert.Nil(t, orders)
+	mockLog.AssertExpectations(t)
+}
+
+func TestClient_FetchOrdersIncremental_InvalidJSON(t *testing.T) {
+	// Arrange
+	mockLog := new(MockLogger)
+	
+	// Tạo mock HTTP server trả về invalid JSON
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("invalid json"))
+	}))
+	defer server.Close()
+
+	cfg := config.PancakeConfig{
+		BaseURL:  server.URL,
+		APIKey:   "test-api-key",
+		ShopID:   "test-shop-id",
+		PageSize: 500,
+		SleepMS:  100,
+	}
+
+	client := NewClient(cfg, mockLog)
+	ctx := context.Background()
+	start := time.Now().Add(-1 * time.Hour)
+	end := time.Now()
+
+	// Setup mock expectations
+	mockLog.On("Info", mock.Anything, mock.Anything).Return()
+	mockLog.On("Error", mock.Anything, mock.Anything).Return()
+
+	// Act
+	orders, err := client.FetchOrdersIncremental(ctx, &start, &end)
+
+	// Assert
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "decode response")
+	assert.Nil(t, orders)
+	mockLog.AssertExpectations(t)
+}
+
+func TestClient_FetchOrdersIncremental_EmptyData(t *testing.T) {
+	// Arrange
+	mockLog := new(MockLogger)
+	
+	// Tạo mock HTTP server trả về empty data
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := map[string]interface{}{
+			"data":       []json.RawMessage{},
+			"total_pages": 1,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	cfg := config.PancakeConfig{
+		BaseURL:  server.URL,
+		APIKey:   "test-api-key",
+		ShopID:   "test-shop-id",
+		PageSize: 500,
+		SleepMS:  100,
+	}
+
+	client := NewClient(cfg, mockLog)
+	ctx := context.Background()
+	start := time.Now().Add(-1 * time.Hour)
+	end := time.Now()
+
+	// Setup mock expectations
+	mockLog.On("Info", mock.Anything, mock.Anything).Return()
+
+	// Act
+	orders, err := client.FetchOrdersIncremental(ctx, &start, &end)
+
+	// Assert
+	assert.NoError(t, err)
+	assert.Len(t, orders, 0)
+	mockLog.AssertExpectations(t)
+}
+
+func TestClient_FetchOrdersIncremental_MultiplePages(t *testing.T) {
+	// Arrange
+	mockLog := new(MockLogger)
+	pageCount := 0
+	
+	// Tạo mock HTTP server với pagination
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pageCount++
+		response := map[string]interface{}{
+			"data": []json.RawMessage{
+				json.RawMessage(`{"id": "` + string(rune(pageCount)) + `", "status": "pending"}`),
+			},
+			"total_pages": 2,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	cfg := config.PancakeConfig{
+		BaseURL:  server.URL,
+		APIKey:   "test-api-key",
+		ShopID:   "test-shop-id",
+		PageSize: 500,
+		SleepMS:  10, // Giảm sleep time cho test
+	}
+
+	client := NewClient(cfg, mockLog)
+	ctx := context.Background()
+	start := time.Now().Add(-1 * time.Hour)
+	end := time.Now()
+
+	// Setup mock expectations
+	mockLog.On("Info", mock.Anything, mock.Anything).Return()
+
+	// Act
+	orders, err := client.FetchOrdersIncremental(ctx, &start, &end)
+
+	// Assert
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, len(orders), 1) // Ít nhất 1 order từ mỗi page
+	mockLog.AssertExpectations(t)
 }

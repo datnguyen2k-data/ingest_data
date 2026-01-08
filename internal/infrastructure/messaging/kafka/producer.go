@@ -3,24 +3,27 @@ package kafka
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"ingest_data/internal/config"
+	"ingest_data/pkg/logger"
 )
 
 type OrderProducer struct {
 	client *kgo.Client
 	topic  string
+	logger logger.Logger
 }
 
-func NewOrderProducer(cfg config.KafkaConfig) *OrderProducer {
+// NewOrderProducer tạo producer mới với logger được inject (DI)
+func NewOrderProducer(cfg config.KafkaConfig, log logger.Logger) *OrderProducer {
 	// Log cấu hình kết nối
-	log.Printf("[Kafka Producer] Connecting to brokers: %v", cfg.Brokers)
-	log.Printf("[Kafka Producer] Topic: %s", cfg.OrderTopic)
+	log.Info("Connecting to Kafka brokers",
+		logger.Any("brokers", cfg.Brokers),
+		logger.String("topic", cfg.OrderTopic))
 
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
@@ -32,16 +35,18 @@ func NewOrderProducer(cfg config.KafkaConfig) *OrderProducer {
 
 	client, err := kgo.NewClient(opts...)
 	if err != nil {
-		log.Printf("[Kafka Producer] Failed to create client: %v", err)
+		log.Error("Failed to create Kafka producer client", logger.Error(err))
 		panic(fmt.Errorf("create kafka producer: %w", err))
 	}
 
-	log.Printf("[Kafka Producer] Successfully created producer client")
-	log.Printf("[Kafka Producer] Note: Connection will be tested on first publish")
+	log.Info("Successfully created Kafka producer client",
+		logger.String("topic", cfg.OrderTopic),
+		logger.String("note", "Connection will be tested on first publish"))
 
 	return &OrderProducer{
 		client: client,
 		topic:  cfg.OrderTopic,
+		logger: log,
 	}
 }
 
@@ -61,19 +66,23 @@ func (p *OrderProducer) PublishOrder(ctx context.Context, payload []byte) error 
 	results := p.client.ProduceSync(ctx, rec)
 
 	if err := results.FirstErr(); err != nil {
-		log.Printf("[Kafka Producer] Failed to publish to topic %s: %v", p.topic, err)
-		log.Printf("[Kafka Producer] Payload size: %d bytes", len(payload))
+		p.logger.Error("Failed to publish message to Kafka",
+			logger.String("topic", p.topic),
+			logger.Int("payload_size", len(payload)),
+			logger.Error(err))
 		return fmt.Errorf("publish to kafka topic %s: %w", p.topic, err)
 	}
 
-	// Log thành công (có thể comment lại nếu quá nhiều log)
-	// log.Printf("[Kafka Producer] Successfully published message to topic %s (size: %d bytes)", p.topic, len(payload))
+	// Log thành công ở debug level để tránh quá nhiều log
+	p.logger.Debug("Successfully published message to Kafka",
+		logger.String("topic", p.topic),
+		logger.Int("payload_size", len(payload)))
 
 	return nil
 }
 
 func (p *OrderProducer) Close(ctx context.Context) error {
-	log.Printf("[Kafka Producer] Closing producer for topic %s", p.topic)
+	p.logger.Info("Closing Kafka producer", logger.String("topic", p.topic))
 	p.client.Close()
 	return nil
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 
 	"ingest_data/internal/application/order"
 	"ingest_data/internal/config"
@@ -11,34 +10,47 @@ import (
 	"ingest_data/internal/infrastructure/persistence/postgres"
 	"ingest_data/internal/interfaces/http/handler"
 	"ingest_data/internal/interfaces/http/router"
+	"ingest_data/pkg/logger"
 )
 
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("load config failed: %v", err)
+		panic("load config failed: " + err.Error())
 	}
+
+	// Khởi tạo logger với DI
+	log, err := logger.NewZapLogger(cfg.App.Env)
+	if err != nil {
+		panic("initialize logger failed: " + err.Error())
+	}
+	defer log.Sync()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	pool, err := postgres.NewPool(cfg.DB)
 	if err != nil {
-		log.Fatalf("postgres connection failed: %v", err)
+		log.Fatal("Postgres connection failed", logger.Error(err))
 	}
 	defer pool.Close()
 
 	orderRepo := postgres.NewOrderRepository(pool)
 
-	producer := kafkainfra.NewOrderProducer(cfg.Kafka)
-	defer producer.Close(ctx)
+	// Inject logger vào producer
+	producer := kafkainfra.NewOrderProducer(cfg.Kafka, log)
+	defer func() {
+		if err := producer.Close(ctx); err != nil {
+			log.Error("Failed to close Kafka producer", logger.Error(err))
+		}
+	}()
 
 	orderService := order.NewService(orderRepo, producer)
 
 	consumer := kafkainfra.NewOrderConsumer(cfg.Kafka, orderService)
 	go func() {
 		if err := consumer.Start(ctx); err != nil {
-			log.Printf("kafka consumer stopped: %v", err)
+			log.Error("Kafka consumer stopped", logger.Error(err))
 		}
 	}()
 	defer consumer.Close()
@@ -48,8 +60,10 @@ func main() {
 	router.RegisterRoutes(engine, orderHandler)
 
 	server := ginserver.NewServer(cfg.Server, engine)
+	log.Info("Starting HTTP server",
+		logger.String("address", cfg.Server.Address()))
 	if err := server.Run(); err != nil {
-		log.Fatalf("server run failed: %v", err)
+		log.Fatal("Server run failed", logger.Error(err))
 	}
 }
 
