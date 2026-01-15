@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  # Pancake Ingest Service
+  # Kết nối đến Kafka external (configure trong .env)
+  pancake-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pancake-ingest
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Không cần depends_on vì Kafka ở external
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "pancake_ingest"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Network: bridge mode để có thể connect đến external Kafka
+    # Hoặc dùng host network nếu Kafka ở cùng host
+    # network_mode: "host"  # Uncomment nếu Kafka ở cùng host

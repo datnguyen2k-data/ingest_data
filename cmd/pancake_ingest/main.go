@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -99,11 +100,15 @@ func main() {
 			TopicName:      cfg.Kafka.OrderTopic,
 			TasksMax:       1,
 			HTTPConfig: connector.HTTPClientConfig{
-				Timeout:             30 * time.Second,
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
-				RetryMaxAttempts:    3,
-				RetryBackoff:        1 * time.Second,
+				Timeout:               30 * time.Second,
+				MaxIdleConns:          1000, // Tăng connection pool cho high throughput
+				MaxIdleConnsPerHost:   100,  // Tăng per-host connections
+				RetryMaxAttempts:      3,
+				RetryBackoff:          1 * time.Second,
+				MaxConcurrentRequests: 50,   // Concurrent HTTP requests
+				RequestQueueSize:      1000, // Queue size lớn
+				BatchSize:             1000, // Batch size
+				BatchTimeout:          100 * time.Millisecond,
 			},
 			OffsetConfig: connector.OffsetConfig{
 				Mode:         connector.OffsetModeTimestamp, // Dùng timestamp để track thời gian
@@ -327,37 +332,107 @@ func main() {
 		log.Fatal("Failed to create connector", logger.Error(err))
 	}
 
-	// Tạo channel để nhận records
-	recordsChan := make(chan []connector.Record, 100)
+	// Tạo channel để nhận records với buffer lớn cho high throughput
+	recordsChan := make(chan []connector.Record, 1000)
 	tasks := conn.GetTasks()
 	if len(tasks) > 0 {
 		tasks[0].SetRecordsChannel(recordsChan)
 	}
 
-	// Xử lý records và publish vào Kafka
-	go func() {
-		totalCount := 0
-		for records := range recordsChan {
-			batchCount := 0
-			for _, record := range records {
-				if err := producer.PublishOrder(ctx, record.Value); err != nil {
-					log.Error("Failed to publish to Kafka",
-						logger.Error(err),
-						logger.String("topic", record.Topic),
-						logger.Int("payload_size", len(record.Value)))
-					continue
+	// Worker pool để xử lý records parallel
+	// Số worker = số CPU cores * 2 (có thể điều chỉnh theo nhu cầu)
+	numWorkers := 10
+	log.Info("Starting worker pool for Kafka publishing",
+		logger.Int("num_workers", numWorkers),
+		logger.Int("channel_buffer", cap(recordsChan)))
+
+	var wg sync.WaitGroup
+	totalPublished := int64(0)
+	totalErrors := int64(0)
+	var statsMu sync.RWMutex
+
+	// Start worker pool
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			workerCount := 0
+			workerErrors := 0
+
+			for records := range recordsChan {
+				for _, record := range records {
+					if err := producer.PublishOrder(ctx, record.Value); err != nil {
+						workerErrors++
+						statsMu.Lock()
+						totalErrors++
+						statsMu.Unlock()
+
+						log.Error("Failed to publish to Kafka",
+							logger.Int("worker_id", workerID),
+							logger.Error(err),
+							logger.String("topic", record.Topic),
+							logger.Int("payload_size", len(record.Value)))
+						continue
+					}
+					workerCount++
 				}
-				batchCount++
-				totalCount++
+
+				// Update stats
+				statsMu.Lock()
+				totalPublished += int64(len(records))
+				statsMu.Unlock()
+
+				// Log batch completion (chỉ log khi có nhiều records)
+				if len(records) > 0 {
+					log.Debug("Worker published batch",
+						logger.Int("worker_id", workerID),
+						logger.Int("batch_size", len(records)),
+						logger.Int("worker_total", workerCount))
+				}
 			}
-			if batchCount > 0 {
-				log.Info("Published batch to Kafka",
-					logger.Int("batch_size", batchCount),
-					logger.Int("total_synced", totalCount),
-					logger.String("topic", cfg.Kafka.OrderTopic))
+
+			log.Info("Worker stopped",
+				logger.Int("worker_id", workerID),
+				logger.Int("total_published", workerCount),
+				logger.Int("total_errors", workerErrors))
+		}(i)
+	}
+
+	// Background goroutine để log stats định kỳ
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				statsMu.RLock()
+				published := totalPublished
+				errors := totalErrors
+				statsMu.RUnlock()
+
+				log.Info("Publishing stats",
+					logger.Int64("total_published", published),
+					logger.Int64("total_errors", errors),
+					logger.Int("channel_buffer_used", len(recordsChan)),
+					logger.Int("channel_buffer_capacity", cap(recordsChan)))
 			}
 		}
-		log.Info("Records channel closed")
+	}()
+
+	// Đợi tất cả workers hoàn thành khi shutdown
+	go func() {
+		wg.Wait()
+		statsMu.RLock()
+		published := totalPublished
+		errors := totalErrors
+		statsMu.RUnlock()
+
+		log.Info("All workers stopped",
+			logger.Int64("total_published", published),
+			logger.Int64("total_errors", errors))
 	}()
 
 	// Khởi động connector

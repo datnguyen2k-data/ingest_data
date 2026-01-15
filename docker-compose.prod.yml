@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # Pancake Ingest Service - Production
+  # Kết nối đến Kafka external (configure trong .env.production)
+  pancake-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILD_VERSION=${BUILD_VERSION:-latest}
+    image: pancake-ingest:${BUILD_VERSION:-latest}
+    container_name: pancake-ingest-prod
+    restart: always
+    env_file:
+      - .env.production
+    # Production resources limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "pancake_ingest"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Logging với rotation
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+        compress: "true"
+    # Security: non-root user (đã set trong Dockerfile)
+    user: "1000:1000"
+    # Network: bridge mode để connect đến external Kafka
+    # Hoặc dùng host network nếu Kafka ở cùng host
+    # network_mode: "host"  # Uncomment nếu Kafka ở cùng host
