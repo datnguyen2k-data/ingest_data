@@ -47,7 +47,7 @@ LOG_LEVEL=info
 make docker-build
 
 # Hoặc build với tag cụ thể
-docker build -t pancake-ingest:v1.0.0 .
+docker build -t ingest_data:v1.0.0 .
 ```
 
 ### 3. Run với Docker Compose
@@ -70,21 +70,21 @@ make docker-down
 
 ```bash
 # Build image
-docker build -t pancake-ingest:latest .
+docker build -t ingest_data:latest .
 
 # Run container
 docker run -d \
-  --name pancake-ingest \
+  --name ingest_data \
   --restart unless-stopped \
   --env-file .env \
-  pancake-ingest:latest
+  ingest_data:latest
 
 # Xem logs
-docker logs -f pancake-ingest
+docker logs -f ingest_data
 
 # Stop container
-docker stop pancake-ingest
-docker rm pancake-ingest
+docker stop ingest_data
+docker rm ingest_data
 ```
 
 ## 🔧 Network Configuration
@@ -219,7 +219,7 @@ docker logs -f pancake-ingest
 
 ```bash
 # Bash shell
-docker-compose exec pancake-ingest sh
+docker-compose exec ingest_data sh
 
 # Hoặc
 make docker-exec
@@ -229,7 +229,7 @@ make docker-exec
 
 ```bash
 # Exec vào container
-docker-compose exec pancake-ingest sh
+docker-compose exec ingest_data sh
 
 # Test network connection (nếu có telnet)
 telnet kafka-host 9092
@@ -252,7 +252,7 @@ nc -zv kafka-host 9092
 
 ```bash
 # Check logs
-docker logs pancake-ingest
+docker logs ingest_data
 
 # Check environment variables
 docker-compose config

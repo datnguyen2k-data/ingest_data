@@ -14,7 +14,7 @@ services:
     # Không cần depends_on vì Kafka ở external
     # Health check
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "pancake_ingest"]
+      test: [ "CMD", "pgrep", "-f", "pancake_ingest" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -25,6 +25,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  kafka-net:
+    external: true
     # Network: bridge mode để có thể connect đến external Kafka
     # Hoặc dùng host network nếu Kafka ở cùng host
     # network_mode: "host"  # Uncomment nếu Kafka ở cùng host
