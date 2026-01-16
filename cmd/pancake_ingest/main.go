@@ -93,6 +93,9 @@ func main() {
 		logger.String("poll_interval", pollInterval.String()),
 		logger.String("time_window", timeWindow.String()))
 
+	// Tạo channel để nhận records với buffer lớn cho high throughput
+	recordsChan := make(chan []connector.Record, 1000)
+
 	// Tạo connector config
 	connectorConfig := connector.PollingConfig{
 		ConnectorConfig: connector.ConnectorConfig{
@@ -203,19 +206,28 @@ func main() {
 				logger.Int("orders_count", len(body.Data)),
 				logger.Int("total_pages", body.TotalPages))
 
-			allRecords := make([]connector.Record, 0)
-
-			// Thêm records từ page đầu tiên
+			// STREAMING: Xử lý batch đầu tiên và gửi ngay lập tức
+			firstBatch := make([]connector.Record, 0, len(body.Data))
 			for _, item := range body.Data {
 				if !json.Valid(item) {
 					log.Warn("Invalid JSON in order data, skipping")
 					continue
 				}
-				allRecords = append(allRecords, connector.Record{
+				firstBatch = append(firstBatch, connector.Record{
 					Value:     item,
 					Topic:     cfg.Kafka.OrderTopic,
 					Timestamp: time.Now().UTC(),
 				})
+			}
+
+			// Gửi batch đầu tiên vào channel
+			if len(firstBatch) > 0 {
+				select {
+				case recordsChan <- firstBatch:
+					// OK
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
 			}
 
 			// Fetch các pages còn lại nếu có
@@ -224,7 +236,7 @@ func main() {
 				reqURL, err := url.Parse(resp.Request.URL)
 				if err != nil {
 					log.Error("Failed to parse request URL", logger.Error(err))
-					return allRecords, nil // Trả về records đã có
+					return nil, nil // Đã gửi batch đầu tiên rồi
 				}
 
 				// Fetch các pages còn lại
@@ -289,33 +301,38 @@ func main() {
 						logger.Int("page", page),
 						logger.Int("orders_count", len(pageBody.Data)))
 
-					// Thêm records từ page này
+					// STREAMING: Xử lý và gửi batch này ngay lập tức
+					batch := make([]connector.Record, 0, len(pageBody.Data))
 					for _, item := range pageBody.Data {
 						if !json.Valid(item) {
 							continue
 						}
-						allRecords = append(allRecords, connector.Record{
+						batch = append(batch, connector.Record{
 							Value:     item,
 							Topic:     cfg.Kafka.OrderTopic,
 							Timestamp: time.Now().UTC(),
 						})
 					}
 
-					// Sleep giữa các pages (như code cũ)
-					select {
-					case <-ctx.Done():
-						log.Warn("Context cancelled while fetching pages")
-						return allRecords, ctx.Err()
-					case <-time.After(time.Duration(cfg.Pancake.SleepMS) * time.Millisecond):
+					if len(batch) > 0 {
+						select {
+						case recordsChan <- batch:
+							// OK
+						case <-ctx.Done():
+							log.Warn("Context cancelled while fetching pages")
+							return nil, ctx.Err()
+						case <-time.After(time.Duration(cfg.Pancake.SleepMS) * time.Millisecond):
+							// Sleep giữa các pages để tránh rate limit
+						}
 					}
 				}
 			}
 
-			log.Info("Completed fetching all pages",
-				logger.Int("total_orders", len(allRecords)),
-				logger.Int("total_pages", body.TotalPages))
+			log.Info("Completed fetching all pages (streaming mode)")
 
-			return allRecords, nil
+			// Trả về nil vì data đã được bắn trực tiếp vào recordsChan
+			// Connector loop sẽ nhận được danh sách rỗng, cập nhật offset và đợi poll tiếp theo
+			return nil, nil
 		},
 
 		// ErrorHandler: Xử lý lỗi
@@ -332,8 +349,6 @@ func main() {
 		log.Fatal("Failed to create connector", logger.Error(err))
 	}
 
-	// Tạo channel để nhận records với buffer lớn cho high throughput
-	recordsChan := make(chan []connector.Record, 1000)
 	tasks := conn.GetTasks()
 	if len(tasks) > 0 {
 		tasks[0].SetRecordsChannel(recordsChan)

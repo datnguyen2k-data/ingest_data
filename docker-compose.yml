@@ -1,14 +1,12 @@
-version: '3.8'
-
 services:
   # Pancake Ingest Service
   # Kết nối đến Kafka external (configure trong .env)
-  pancake-ingest:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: pancake-ingest
+  ingest-data:
+    image: ingest_data:1.0.0
+    container_name: ingest-data
     restart: unless-stopped
+    networks:
+      - kafka-net
     env_file:
       - .env
     # Không cần depends_on vì Kafka ở external

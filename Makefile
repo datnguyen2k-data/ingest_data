@@ -73,7 +73,7 @@ docker-logs: ## Xem logs của tất cả services
 	docker-compose logs -f
 
 docker-logs-app: ## Xem logs của pancake-ingest service
-	docker-compose logs -f pancake-ingest
+	docker-compose logs -f ingest-data
 
 docker-restart: ## Restart pancake-ingest service
 	@echo "$(YELLOW)Restarting pancake-ingest...$(NC)"

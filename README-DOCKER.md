@@ -47,7 +47,7 @@ LOG_LEVEL=info
 make docker-build
 
 # Hoặc build với tag cụ thể
-docker build -t ingest_data:v1.0.0 .
+docker build -t ingest_data:1.0.0 .
 ```
 
 ### 3. Run với Docker Compose
@@ -229,7 +229,7 @@ make docker-exec
 
 ```bash
 # Exec vào container
-docker-compose exec ingest_data sh
+docker-compose exec ingest-data sh
 
 # Test network connection (nếu có telnet)
 telnet kafka-host 9092
