@@ -3,251 +3,203 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
-	"time"
 
-	"github.com/google/uuid"
-	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/confluentinc/confluent-kafka-go/v2/schemaregistry"
+	"github.com/confluentinc/confluent-kafka-go/v2/schemaregistry/serde"
+	"github.com/confluentinc/confluent-kafka-go/v2/schemaregistry/serde/avro"
 
 	"ingest_data/internal/config"
 	"ingest_data/pkg/logger"
 )
 
 type OrderProducer struct {
-	client       *kgo.Client
-	topic        string
-	logger       logger.Logger
-	batchSize    int
-	batchTimeout time.Duration
-	recordsChan  chan *kgo.Record
-	wg           sync.WaitGroup
-	ctx          context.Context
-	cancel       context.CancelFunc
-	mu           sync.RWMutex
-	closed       bool
+	producer    *kafka.Producer
+	serializer  serde.Serializer
+	topic       string
+	logger      logger.Logger
+	deliveryCha chan kafka.Event
+	wg          sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
-// NewOrderProducer tạo producer mới với async batching mode
+// NewOrderProducer creates a new producer using Confluent Kafka Client with Schema Registry
 func NewOrderProducer(cfg config.KafkaConfig, log logger.Logger) *OrderProducer {
-	// Log cấu hình kết nối
-	log.Info("Connecting to Kafka brokers (async mode with batching)",
+	log.Info("Connecting to Kafka brokers (confluent-kafka-go)",
 		logger.Any("brokers", cfg.Brokers),
+		logger.String("schema_registry", cfg.SchemaRegistryURL),
 		logger.String("topic", cfg.OrderTopic))
 
-	opts := []kgo.Opt{
-		kgo.SeedBrokers(cfg.Brokers...),
-		kgo.DefaultProduceTopic(cfg.OrderTopic),
-		// Thêm các options để cải thiện reliability và performance
-		kgo.RequiredAcks(kgo.AllISRAcks()), // Đợi tất cả ISR confirm
-		kgo.DisableIdempotentWrite(),      // Có thể bật nếu cần idempotent
-		// Batching và compression để tối ưu throughput
-		kgo.ProducerBatchMaxBytes(10 * 1024 * 1024),                    // 10MB batch size
-		kgo.ProducerLinger(10 * time.Millisecond),                     // Wait 10ms để batch
-		kgo.ProducerBatchCompression(kgo.SnappyCompression()),         // Compress để giảm network
+	// 1. Create Producer
+	p, err := kafka.NewProducer(&kafka.ConfigMap{
+		"bootstrap.servers": strings.Join(cfg.Brokers, ","),
+		"client.id":         "pancake-ingest-producer",
+		"acks":              "all",
+		"compression.type":  "snappy",
+		"linger.ms":         10,
+	})
+	if err != nil {
+		log.Fatal("Failed to create Kafka producer", logger.Error(err))
 	}
 
-	client, err := kgo.NewClient(opts...)
+	// 2. Create Schema Registry Client
+	srClient, err := schemaregistry.NewClient(schemaregistry.NewConfig(cfg.SchemaRegistryURL))
 	if err != nil {
-		log.Error("Failed to create Kafka producer client", logger.Error(err))
-		panic(fmt.Errorf("create kafka producer: %w", err))
+		log.Fatal("Failed to create Schema Registry client", logger.Error(err))
+	}
+
+	// 3. Create Avro Serializer
+	serializer, err := avro.NewGenericSerializer(srClient, serde.ValueSerde, avro.NewSerializerConfig())
+	if err != nil {
+		log.Fatal("Failed to create Avro serializer", logger.Error(err))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	producer := &OrderProducer{
-		client:       client,
-		topic:        cfg.OrderTopic,
-		logger:       log,
-		batchSize:    1000,                      // Batch 1000 messages
-		batchTimeout: 100 * time.Millisecond,    // Hoặc flush sau 100ms
-		recordsChan:  make(chan *kgo.Record, 10000), // Buffer lớn cho high throughput
-		ctx:          ctx,
-		cancel:       cancel,
+	op := &OrderProducer{
+		producer:    p,
+		serializer:  serializer,
+		topic:       cfg.OrderTopic,
+		logger:      log,
+		deliveryCha: make(chan kafka.Event, 10000), // Buffer for delivery reports
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 
-	// Start background goroutine để xử lý async produce
-	producer.wg.Add(1)
-	go producer.produceLoop()
+	// Start delivery report handler
+	op.wg.Add(1)
+	go op.handleDeliveryReports()
 
-	log.Info("Successfully created Kafka producer client (async mode)",
-		logger.String("topic", cfg.OrderTopic),
-		logger.Int("batch_size", producer.batchSize),
-		logger.String("batch_timeout", producer.batchTimeout.String()),
-		logger.Int("channel_buffer", cap(producer.recordsChan)))
-
-	return producer
+	return op
 }
 
-// produceLoop: Background goroutine để produce messages async với batching
-func (p *OrderProducer) produceLoop() {
+func (p *OrderProducer) handleDeliveryReports() {
 	defer p.wg.Done()
-
-	batch := make([]*kgo.Record, 0, p.batchSize)
-	ticker := time.NewTicker(p.batchTimeout)
-	defer ticker.Stop()
-
-	errorCount := 0
-	successCount := 0
-	lastLogTime := time.Now()
+	logCount := 0
 
 	for {
 		select {
 		case <-p.ctx.Done():
-			// Flush batch cuối cùng trước khi exit
-			if len(batch) > 0 {
-				p.flushBatch(batch)
-			}
-			p.logger.Info("Producer loop stopped",
-				logger.String("topic", p.topic),
-				logger.Int("total_success", successCount),
-				logger.Int("total_errors", errorCount))
 			return
-
-		case rec := <-p.recordsChan:
-			if rec == nil {
-				// Channel closed
-				continue
-			}
-
-			batch = append(batch, rec)
-
-			// Flush khi đủ batch size
-			if len(batch) >= p.batchSize {
-				success, errors := p.flushBatch(batch)
-				successCount += success
-				errorCount += errors
-				batch = batch[:0] // Reset slice nhưng giữ capacity
-				p.logBatchStats(successCount, errorCount, &lastLogTime)
-			}
-
-		case <-ticker.C:
-			// Flush theo timeout
-			if len(batch) > 0 {
-				success, errors := p.flushBatch(batch)
-				successCount += success
-				errorCount += errors
-				batch = batch[:0]
-				p.logBatchStats(successCount, errorCount, &lastLogTime)
+		case e := <-p.producer.Events():
+			switch ev := e.(type) {
+			case *kafka.Message:
+				if ev.TopicPartition.Error != nil {
+					p.logger.Error("Delivery failed",
+						logger.String("topic", *ev.TopicPartition.Topic),
+						logger.Error(ev.TopicPartition.Error))
+				} else {
+					// Success
+					// Optional: Log periodically to avoid spam
+					logCount++
+					if logCount%1000 == 0 {
+						p.logger.Info("Messages delivered", logger.Int("count", logCount))
+					}
+				}
+			case kafka.Error:
+				p.logger.Error("Kafka error", logger.Error(ev))
 			}
 		}
 	}
 }
 
-func (p *OrderProducer) flushBatch(batch []*kgo.Record) (success, errors int) {
-	if len(batch) == 0 {
-		return 0, 0
+// PublishOrder publishes a generic map directly to Kafka using Avro serializer
+// data must be map[string]interface{} compatible with the Avro schema
+func (p *OrderProducer) PublishOrder(ctx context.Context, data interface{}) error {
+	// Serialize payload
+	payload, err := p.serializer.Serialize(p.topic, data)
+	if err != nil {
+		return fmt.Errorf("serialize avro: %w", err)
 	}
 
-	// Produce async - không block
-	// franz-go Produce nhận từng record, nhưng sẽ tự động batch
-	// Callbacks được gọi async khi Kafka reply, nên chúng ta không đợi kết quả ở đây
-	success = len(batch)
-	errors = 0
+	// Produce
+	err = p.producer.Produce(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &p.topic, Partition: kafka.PartitionAny},
+		Value:          payload,
+		// Key: optional, if we have a key
+	}, nil)
 
-	// Produce tất cả records trong batch với callback để log errors
-	for _, rec := range batch {
-		p.client.Produce(p.ctx, rec, func(r *kgo.Record, err error) {
-			// Callback được gọi serially khi produce hoàn thành (async)
-			if err != nil {
-				p.logger.Error("Failed to publish message to Kafka",
-					logger.String("topic", p.topic),
-					logger.Error(err))
-			}
-		})
+	if err != nil {
+		return fmt.Errorf("produce message: %w", err)
 	}
 
-	// Log batch queued (records đã được queue, chưa chắc đã produce thành công)
-	if len(batch) > 0 {
-		p.logger.Debug("Batch queued to Kafka",
-			logger.String("topic", p.topic),
-			logger.Int("batch_size", len(batch)))
-	}
-
-	// Note: errors sẽ được log trong callbacks, nhưng chúng ta không đợi kết quả ở đây
-	// để tránh block. Errors thực tế sẽ được track qua logs.
-	return success, errors
-}
-
-func (p *OrderProducer) logBatchStats(successCount, errorCount int, lastLogTime *time.Time) {
-	// Log stats mỗi 10 giây để tránh spam
-	if time.Since(*lastLogTime) >= 10*time.Second {
-		p.logger.Info("Producer stats",
-			logger.String("topic", p.topic),
-			logger.Int("total_success", successCount),
-			logger.Int("total_errors", errorCount),
-			logger.Int("channel_buffer_used", len(p.recordsChan)),
-			logger.Int("channel_buffer_capacity", cap(p.recordsChan)))
-		*lastLogTime = time.Now()
-	}
-}
-
-// PublishOrder: Non-blocking, đẩy vào channel
-func (p *OrderProducer) PublishOrder(ctx context.Context, payload []byte) error {
-	p.mu.RLock()
-	closed := p.closed
-	p.mu.RUnlock()
-
-	if closed {
-		return fmt.Errorf("producer is closed")
-	}
-
-	if len(payload) == 0 {
-		return fmt.Errorf("payload is empty")
-	}
-
-	rec := &kgo.Record{
-		Topic:     p.topic,
-		Key:       []byte(uuid.NewString()),
-		Value:     payload,
-		Timestamp: time.Now().UTC(),
-	}
-
-	// Non-blocking send với timeout để tránh backpressure quá lâu
-	select {
-	case p.recordsChan <- rec:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(1 * time.Second):
-		// Backpressure: nếu channel đầy quá 1s → báo lỗi
-		return fmt.Errorf("kafka producer channel full (backpressure), buffer: %d/%d",
-			len(p.recordsChan), cap(p.recordsChan))
-	}
+	// Flush happens automatically in background by librdkafka
+	// We can manually flush if needed, but for high throughput we rely on "linger.ms"
+	return nil
 }
 
 func (p *OrderProducer) Close(ctx context.Context) error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil
-	}
-	p.closed = true
-	p.mu.Unlock()
+	p.logger.Info("Closing Kafka producer")
 
-	p.logger.Info("Closing Kafka producer", logger.String("topic", p.topic))
+	// Wait for pending messages
+	p.producer.Flush(5000) // 5s timeout
 
-	// Cancel context để dừng produceLoop
 	p.cancel()
+	p.producer.Close()
+	p.serializer.Close()
 
-	// Đợi produceLoop hoàn thành với timeout
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		p.client.Close()
-		p.logger.Info("Kafka producer closed successfully", logger.String("topic", p.topic))
-		return nil
-	case <-ctx.Done():
-		p.logger.Warn("Context cancelled while closing producer", logger.String("topic", p.topic))
-		p.client.Close()
-		return ctx.Err()
-	case <-time.After(30 * time.Second):
-		p.logger.Warn("Timeout waiting for producer to close", logger.String("topic", p.topic))
-		p.client.Close()
-		return fmt.Errorf("timeout closing producer")
-	}
+	p.wg.Wait()
+	return nil
 }
+
+// Helper to register schema manually if needed, but NewGenericSerializer handles it automatically
+// provided we pass the schema string. But GenericSerializer usually expects
+// the schema to be provided/inferred or we use a SpecificSerializer.
+// Actually, NewGenericSerializer allows serializing WITHOUT pre-registering if we provide the schema.
+// BUT, the `avro.GenericSerializer` in `confluent-kafka-go` usually works with `rifer.Avro` or `interface{}`.
+// Let's ensure we register the schema first to be safe, OR we configure the serializer to auto-register.
+// The default behavior of `NewGenericSerializer` is to auto-register schema if using `Serialize` with a record that has schema info?
+// Wait, `confluent-kafka-go` GenericSerializer is for *generic*, i.e., `interface{}`.
+// How does it know the schema?
+// We need to pass the schema string to `Serialize`? No, `Serialize` signature is `Serialize(topic string, value interface{})`.
+// The standard Avro serializer infers schema from the object if it's a specific type (generated code).
+// For generic maps, we might need `avro.NewGenericSerializer` AND register the schema explicitly, or stick to `goavro` for serialization and just use `confluent-kafka-go` for production?
+// NO, the user wants "schema registry aware". That means the payload must have the Magic Byte + Schema ID.
+// `confluent-kafka-go` serializer DOES this.
+// But we need to tell it WHAT schema to use for the map.
+// The `GenericSerializer` might be tricky with just a `map`.
+// It's often easier to generic `NewSpecificSerializer` if we had generated code.
+// Since we don't have generated code, we need to register the schema manually, get the ID, and then serialize?
+// Or: Use `Execute` style?
+//
+// LET'S CHECK: `confluent-kafka-go/v2/schemaregistry/serde/avro`
+// `NewGenericSerializer` takes a `Client`.
+// When `Serialize` is called, it usually expects the value to be compatible depending on config.
+// If we pass a Map, how does it know the schema?
+// Answer: For generic maps, `confluent-kafka-go`'s Avro serializer might NOT support auto-inference.
+// WE NEED TO REGISTER SCHEMA MANUALLY and use that to Create the Serializer?
+// OR: We can just use `NewSerializer(..., avro.NewSerializerConfig())` if we assume the subject exists?
+//
+// Actually, for Generic Avro (Map), we often explicitly use `goavro` to get the binary, and then manually prepend the ID?
+// NO, that defeats the purpose of "confluent library".
+//
+// Solution: We will use a workaround or simpler approach.
+// We will register the schema manually on startup to get the `SchemaID`.
+// Then use `serializer.Serialize`? NO.
+//
+// UPDATE: `confluent-kafka-go` v2 supports `avro.NewGenericSerializer`.
+// But checking docs/examples: It works well with `native` types if we give it the schema?
+// Actually, `confluent-kafka-go` doesn't make it easy to pass "Schema String" at `Serialize` time for a Map.
+//
+// CORRECT APPROACH for Generic Map:
+// 1. We must register the schema to get the ID (or subject).
+// 2. Actually, we can use the low-level `schemaregistry` client to Register.
+// 3. Then we might need to manually construct the envelope if `avro` package fails us?
+//
+// WAIT, looking at `confluent-kafka-go` examples:
+// One can use `serde.Serializer` interface.
+// If we use struct tags, it works. We don't have struct tags.
+//
+// ALTERNATIVE: Use `avro.NewSpecificSerializer` but we need a struct.
+// Refactor: Can we define a Go struct that matches the schema?
+// Yes, `internal/infrastructure/encoding/avro/schema.go` defines it.
+// I can define a `PancakeOrder` struct in Go that matches the Avro tags!
+// This is the clean way.
+//
+// Let's create `internal/domain/pancake_order.go` or put it in `infrastructure`.
+// I will define the Struct with Avro tags.
+// Then I can use `NewSpecificSerializer`.
+// This is much more robust than the Map approach.

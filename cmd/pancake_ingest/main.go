@@ -43,6 +43,9 @@ func main() {
 	if len(cfg.Kafka.Brokers) == 0 {
 		log.Fatal("KAFKA_BOOTSTRAP_SERVERS is empty (ví dụ: localhost:19092,localhost:29092,localhost:39092)")
 	}
+	if cfg.Kafka.SchemaRegistryURL == "" {
+		log.Fatal("KAFKA_SCHEMA_REGISTRY_URL is empty")
+	}
 	if cfg.Pancake.APIKey == "" || cfg.Pancake.ShopID == "" {
 		log.Fatal("PANCAKE_CHANDO_API_KEY or PANCAKE_CHANDO_SHOP_ID is empty")
 	}
@@ -52,6 +55,7 @@ func main() {
 		logger.String("env", cfg.App.Env),
 		logger.Any("kafka_brokers", cfg.Kafka.Brokers),
 		logger.String("kafka_topic", cfg.Kafka.OrderTopic),
+		logger.String("schema_registry", cfg.Kafka.SchemaRegistryURL),
 		logger.String("pancake_shop_id", cfg.Pancake.ShopID))
 
 	// Setup context với signal handling
@@ -67,7 +71,7 @@ func main() {
 		cancel()
 	}()
 
-	// Tạo Kafka producer
+	// Tạo Kafka producer (Confluent)
 	producer := kafkaInfra.NewOrderProducer(cfg.Kafka, log)
 	defer func() {
 		if err := producer.Close(ctx); err != nil {
@@ -97,12 +101,6 @@ func main() {
 	// Tạo channel để nhận records với buffer lớn cho high throughput
 	recordsChan := make(chan []connector.Record, 1000)
 
-	// Khởi tạo Avro Encoder
-	encoder, err := avro.NewEncoder(avro.PancakeOrderSchema)
-	if err != nil {
-		log.Fatal("Failed to initialize Avro encoder", logger.Error(err))
-	}
-
 	// Tạo connector config
 	connectorConfig := connector.PollingConfig{
 		ConnectorConfig: connector.ConnectorConfig{
@@ -111,27 +109,25 @@ func main() {
 			TasksMax:       1,
 			HTTPConfig: connector.HTTPClientConfig{
 				Timeout:               30 * time.Second,
-				MaxIdleConns:          1000, // Tăng connection pool cho high throughput
-				MaxIdleConnsPerHost:   100,  // Tăng per-host connections
+				MaxIdleConns:          1000,
+				MaxIdleConnsPerHost:   100,
 				RetryMaxAttempts:      3,
 				RetryBackoff:          1 * time.Second,
-				MaxConcurrentRequests: 50,   // Concurrent HTTP requests
-				RequestQueueSize:      1000, // Queue size lớn
-				BatchSize:             1000, // Batch size
+				MaxConcurrentRequests: 50,
+				RequestQueueSize:      1000,
+				BatchSize:             1000,
 				BatchTimeout:          100 * time.Millisecond,
 			},
 			OffsetConfig: connector.OffsetConfig{
-				Mode:         connector.OffsetModeTimestamp, // Dùng timestamp để track thời gian
+				Mode:         connector.OffsetModeTimestamp,
 				InitialValue: time.Now().UTC().Add(-timeWindow),
 			},
 		},
 		URL:          baseURL.String(),
 		PollInterval: pollInterval,
 
-		// RequestBuilder: Xây dựng request cho Pancake API - chỉ lấy page đầu tiên
-		// ResponseParser sẽ tự động fetch tất cả các pages còn lại
+		// RequestBuilder: Xây dựng request cho Pancake API
 		RequestBuilder: func(offset connector.Offset) (*connector.HTTPRequest, error) {
-			// Lấy startTime từ offset (lần poll trước), endTime là bây giờ
 			var startTime time.Time
 			if offset.Value != nil {
 				if t, ok := offset.Value.(time.Time); ok && !t.IsZero() {
@@ -144,26 +140,22 @@ func main() {
 			}
 			endTime := time.Now().UTC()
 
-			// Convert sang Unix timestamp (số nguyên) - đúng format như URL mẫu
 			startUnix := startTime.Unix()
 			endUnix := endTime.Unix()
 
-			// Build URL đúng format: https://pos.pages.fm/api/v1/shops/{shop_id}/orders?...
 			u := *baseURL
 			u.Path = fmt.Sprintf("%s/shops/%s/orders", baseURL.Path, cfg.Pancake.ShopID)
 
-			// Build query parameters theo đúng format URL mẫu
 			q := u.Query()
 			q.Set("api_key", cfg.Pancake.APIKey)
-			q.Set("startDateTime", fmt.Sprintf("%d", startUnix)) // Unix timestamp (số nguyên)
-			q.Set("endDateTime", fmt.Sprintf("%d", endUnix))     // Unix timestamp (số nguyên)
-			q.Set("updateStatus", "inserted_at")                 // inserted_at như trong URL mẫu
+			q.Set("startDateTime", fmt.Sprintf("%d", startUnix))
+			q.Set("endDateTime", fmt.Sprintf("%d", endUnix))
+			q.Set("updateStatus", "inserted_at")
 			q.Set("page_size", fmt.Sprintf("%d", cfg.Pancake.PageSize))
-			q.Set("page_number", "1")               // Bắt đầu từ page 1
-			q.Set("option_sort", "updated_at_desc") // Sort theo updated_at desc
+			q.Set("page_number", "1")
+			q.Set("option_sort", "updated_at_desc")
 			u.RawQuery = q.Encode()
 
-			// Log URL (ẩn API key)
 			logURL := u.String()
 			if cfg.Pancake.APIKey != "" {
 				logURL = strings.ReplaceAll(logURL, cfg.Pancake.APIKey, "***")
@@ -186,7 +178,6 @@ func main() {
 
 		// ResponseParser: Parse response và fetch tất cả các pages còn lại
 		ResponseParser: func(resp *connector.HTTPResponse) ([]connector.Record, error) {
-			// Kiểm tra status code
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				errorMsg := fmt.Sprintf("pancake api status %d: %s", resp.StatusCode, string(resp.Body))
 				log.Error("Pancake API error response",
@@ -195,7 +186,6 @@ func main() {
 				return nil, fmt.Errorf("pancake api error: %s", errorMsg)
 			}
 
-			// Parse JSON response
 			var body struct {
 				Data       []json.RawMessage `json:"data"`
 				TotalPages int               `json:"total_pages"`
@@ -213,65 +203,54 @@ func main() {
 				logger.Int("orders_count", len(body.Data)),
 				logger.Int("total_pages", body.TotalPages))
 
-			// STREAMING: Xử lý batch đầu tiên và gửi ngay lập tức
-			firstBatch := make([]connector.Record, 0, len(body.Data))
-			for _, item := range body.Data {
-				if !json.Valid(item) {
-					log.Warn("Invalid JSON in order data, skipping")
-					continue
-				}
+			// Helper to process items -> Records (using Struct)
+			processItems := func(items []json.RawMessage) ([]connector.Record, error) {
+				batch := make([]connector.Record, 0, len(items))
+				for _, item := range items {
+					if !json.Valid(item) {
+						continue
+					}
+					var rawMap map[string]interface{}
+					if err := json.Unmarshal(item, &rawMap); err != nil {
+						log.Warn("Failed to unmarshal item to map", logger.Error(err))
+						continue
+					}
 
-				// Unmarshal to map for transformation
-				var rawMap map[string]interface{}
-				if err := json.Unmarshal(item, &rawMap); err != nil {
-					log.Warn("Failed to unmarshal item to map", logger.Error(err))
-					continue
-				}
+					// Map directly to Struct
+					pancakeOrder, err := avro.ToPancakeOrderStruct(rawMap)
+					if err != nil {
+						log.Warn("Failed to map item to struct", logger.Error(err))
+						continue
+					}
 
-				// Map to Avro Native format (handling Unions)
-				nativeData, err := avro.ToPancakeOrderNative(rawMap)
-				if err != nil {
-					log.Warn("Failed to map item to Avro native", logger.Error(err))
-					continue
+					batch = append(batch, connector.Record{
+						Value:     pancakeOrder, // Value is now *PancakeOrderStruct
+						Topic:     cfg.Kafka.OrderTopic,
+						Timestamp: time.Now().UTC(),
+					})
 				}
-
-				// Encode Native to Avro
-				avroBinary, err := encoder.EncodeNative(nativeData)
-				if err != nil {
-					log.Error("Failed to encode order to Avro", logger.Error(err))
-					continue
-				}
-
-				firstBatch = append(firstBatch, connector.Record{
-					Value:     avroBinary,
-					Topic:     cfg.Kafka.OrderTopic,
-					Timestamp: time.Now().UTC(),
-				})
+				return batch, nil
 			}
 
-			// Gửi batch đầu tiên vào channel
+			// Process first page
+			firstBatch, _ := processItems(body.Data)
 			if len(firstBatch) > 0 {
 				select {
 				case recordsChan <- firstBatch:
-					// OK
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
 			}
 
-			// Fetch các pages còn lại nếu có
+			// Fetch subsequent pages
 			if body.TotalPages > 1 {
-				// Parse URL từ request để lấy các tham số
 				reqURL, err := url.Parse(resp.Request.URL)
 				if err != nil {
 					log.Error("Failed to parse request URL", logger.Error(err))
-					return nil, nil // Đã gửi batch đầu tiên rồi
+					return nil, nil
 				}
 
-				// Fetch các pages còn lại
-				httpClient := &http.Client{
-					Timeout: 30 * time.Second,
-				}
+				httpClient := &http.Client{Timeout: 30 * time.Second}
 
 				for page := 2; page <= body.TotalPages; page++ {
 					q := reqURL.Query()
@@ -284,35 +263,22 @@ func main() {
 
 					req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 					if err != nil {
-						log.Error("Failed to build request for page",
-							logger.Int("page", page),
-							logger.Error(err))
 						continue
 					}
 
 					pageResp, err := httpClient.Do(req)
 					if err != nil {
-						log.Error("Failed to fetch page",
-							logger.Int("page", page),
-							logger.Error(err))
+						log.Error("Failed to fetch page", logger.Int("page", page), logger.Error(err))
 						continue
 					}
 
-					// Đọc response
 					pageBodyBytes, err := io.ReadAll(pageResp.Body)
 					pageResp.Body.Close()
 					if err != nil {
-						log.Error("Failed to read page response",
-							logger.Int("page", page),
-							logger.Error(err))
 						continue
 					}
 
 					if pageResp.StatusCode < 200 || pageResp.StatusCode >= 300 {
-						log.Error("Pancake API error for page",
-							logger.Int("page", page),
-							logger.Int("status_code", pageResp.StatusCode),
-							logger.String("response_body", string(pageBodyBytes)))
 						continue
 					}
 
@@ -320,9 +286,6 @@ func main() {
 						Data []json.RawMessage `json:"data"`
 					}
 					if err := json.Unmarshal(pageBodyBytes, &pageBody); err != nil {
-						log.Error("Failed to decode page response",
-							logger.Int("page", page),
-							logger.Error(err))
 						continue
 					}
 
@@ -330,66 +293,23 @@ func main() {
 						logger.Int("page", page),
 						logger.Int("orders_count", len(pageBody.Data)))
 
-					// STREAMING: Xử lý và gửi batch này ngay lập tức
-					batch := make([]connector.Record, 0, len(pageBody.Data))
-					for _, item := range pageBody.Data {
-						if !json.Valid(item) {
-							continue
-						}
-
-						// Unmarshal to map for transformation
-						var rawMap map[string]interface{}
-						if err := json.Unmarshal(item, &rawMap); err != nil {
-							log.Warn("Failed to unmarshal item to map (paged)", logger.Error(err))
-							continue
-						}
-
-						// Map to Avro Native format
-						nativeData, err := avro.ToPancakeOrderNative(rawMap)
-						if err != nil {
-							log.Warn("Failed to map item to Avro native (paged)", logger.Error(err))
-							continue
-						}
-
-						// Encode Native to Avro
-						avroBinary, err := encoder.EncodeNative(nativeData)
-						if err != nil {
-							log.Error("Failed to encode order to Avro (paged)", logger.Error(err))
-							continue
-						}
-
-						batch = append(batch, connector.Record{
-							Value:     avroBinary,
-							Topic:     cfg.Kafka.OrderTopic,
-							Timestamp: time.Now().UTC(),
-						})
-					}
-
+					batch, _ := processItems(pageBody.Data)
 					if len(batch) > 0 {
 						select {
 						case recordsChan <- batch:
-							// OK
 						case <-ctx.Done():
-							log.Warn("Context cancelled while fetching pages")
 							return nil, ctx.Err()
 						case <-time.After(time.Duration(cfg.Pancake.SleepMS) * time.Millisecond):
-							// Sleep giữa các pages để tránh rate limit
 						}
 					}
 				}
 			}
 
-			log.Info("Completed fetching all pages (streaming mode)")
-
-			// Trả về nil vì data đã được bắn trực tiếp vào recordsChan
-			// Connector loop sẽ nhận được danh sách rỗng, cập nhật offset và đợi poll tiếp theo
 			return nil, nil
 		},
 
-		// ErrorHandler: Xử lý lỗi
 		ErrorHandler: func(err error) error {
 			log.Error("Pancake connector error", logger.Error(err))
-			// Return nil để tiếp tục polling, không dừng connector
 			return nil
 		},
 	}
@@ -405,8 +325,7 @@ func main() {
 		tasks[0].SetRecordsChannel(recordsChan)
 	}
 
-	// Worker pool để xử lý records parallel
-	// Số worker = số CPU cores * 2 (có thể điều chỉnh theo nhu cầu)
+	// Worker pool (pass struct directly to producer)
 	numWorkers := 10
 	log.Info("Starting worker pool for Kafka publishing",
 		logger.Int("num_workers", numWorkers),
@@ -417,7 +336,6 @@ func main() {
 	totalErrors := int64(0)
 	var statsMu sync.RWMutex
 
-	// Start worker pool
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -427,96 +345,66 @@ func main() {
 
 			for records := range recordsChan {
 				for _, record := range records {
+					// record.Value is *PancakeOrderStruct
 					if err := producer.PublishOrder(ctx, record.Value); err != nil {
 						workerErrors++
 						statsMu.Lock()
 						totalErrors++
 						statsMu.Unlock()
-
 						log.Error("Failed to publish to Kafka",
 							logger.Int("worker_id", workerID),
-							logger.Error(err),
-							logger.String("topic", record.Topic),
-							logger.Int("payload_size", len(record.Value)))
+							logger.Error(err))
 						continue
 					}
 					workerCount++
 				}
-
-				// Update stats
 				statsMu.Lock()
 				totalPublished += int64(len(records))
 				statsMu.Unlock()
 
-				// Log batch completion (chỉ log khi có nhiều records)
 				if len(records) > 0 {
 					log.Debug("Worker published batch",
 						logger.Int("worker_id", workerID),
-						logger.Int("batch_size", len(records)),
-						logger.Int("worker_total", workerCount))
+						logger.Int("batch_size", len(records)))
 				}
 			}
-
-			log.Info("Worker stopped",
-				logger.Int("worker_id", workerID),
-				logger.Int("total_published", workerCount),
-				logger.Int("total_errors", workerErrors))
 		}(i)
 	}
 
-	// Background goroutine để log stats định kỳ
+	// Background stats log (same as before) ...
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
-
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				statsMu.RLock()
-				published := totalPublished
-				errors := totalErrors
+				pub := totalPublished
+				errs := totalErrors
 				statsMu.RUnlock()
-
 				log.Info("Publishing stats",
-					logger.Int64("total_published", published),
-					logger.Int64("total_errors", errors),
-					logger.Int("channel_buffer_used", len(recordsChan)),
-					logger.Int("channel_buffer_capacity", cap(recordsChan)))
+					logger.Int64("total_published", pub),
+					logger.Int64("total_errors", errs))
 			}
 		}
 	}()
 
-	// Đợi tất cả workers hoàn thành khi shutdown
 	go func() {
 		wg.Wait()
-		statsMu.RLock()
-		published := totalPublished
-		errors := totalErrors
-		statsMu.RUnlock()
-
-		log.Info("All workers stopped",
-			logger.Int64("total_published", published),
-			logger.Int64("total_errors", errors))
+		log.Info("All workers stopped")
 	}()
 
-	// Khởi động connector
 	log.Info("Starting connector...")
 	if err := conn.Start(ctx); err != nil {
 		log.Fatal("Failed to start connector", logger.Error(err))
 	}
 	defer func() {
-		log.Info("Stopping connector...")
-		if err := conn.Stop(ctx); err != nil {
-			log.Error("Failed to stop connector", logger.Error(err))
-		}
+		conn.Stop(ctx)
 	}()
 
 	log.Info("Pancake connector started successfully, polling continuously...")
-	log.Info("Press Ctrl+C to stop")
-
-	// Chạy cho đến khi context bị cancel
 	<-ctx.Done()
 	log.Info("Pancake connector stopped")
 }

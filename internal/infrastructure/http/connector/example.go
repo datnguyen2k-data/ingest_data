@@ -16,10 +16,10 @@ func ExampleHTTPPollingConnector() {
 			TopicName:      "orders",
 			TasksMax:       1,
 			HTTPConfig: HTTPClientConfig{
-				Timeout:            30 * time.Second,
-				MaxIdleConns:       100,
+				Timeout:             30 * time.Second,
+				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 10,
-				RetryMaxAttempts:   3,
+				RetryMaxAttempts:    3,
 			},
 			OffsetConfig: OffsetConfig{
 				Mode:         OffsetModeSimpleIncrementing,
@@ -33,7 +33,7 @@ func ExampleHTTPPollingConnector() {
 			// Build request dựa trên offset
 			offsetValue := offset.Value.(int64)
 			url := fmt.Sprintf("https://api.example.com/orders?offset=%d&limit=100", offsetValue)
-			
+
 			return &HTTPRequest{
 				Method: http.MethodGet,
 				URL:    url,
@@ -59,7 +59,7 @@ func ExampleHTTPPollingConnector() {
 
 	// Tạo channel để nhận records
 	recordsChan := make(chan []Record, 100)
-	
+
 	// Set channel cho task
 	tasks := connector.GetTasks()
 	if len(tasks) > 0 {
@@ -76,7 +76,7 @@ func ExampleHTTPPollingConnector() {
 	go func() {
 		for records := range recordsChan {
 			for _, record := range records {
-				fmt.Printf("Received record: %s\n", string(record.Value))
+				fmt.Printf("Received record: %v\n", record.Value)
 				// Produce vào Kafka hoặc xử lý khác
 			}
 		}
@@ -84,7 +84,7 @@ func ExampleHTTPPollingConnector() {
 
 	// Chạy trong 1 phút
 	time.Sleep(1 * time.Minute)
-	
+
 	// Dừng connector
 	_ = connector.Stop(ctx)
 }
@@ -98,14 +98,14 @@ func ExampleHTTPPollingConnectorWithCursor() {
 			TopicName:      "orders",
 			TasksMax:       1,
 			HTTPConfig: HTTPClientConfig{
-				Timeout:            30 * time.Second,
-				MaxIdleConns:       100,
+				Timeout:             30 * time.Second,
+				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 10,
-				RetryMaxAttempts:   3,
+				RetryMaxAttempts:    3,
 			},
 			OffsetConfig: OffsetConfig{
-				Mode:         OffsetModeCursorBased,
-				InitialValue: "", // Cursor rỗng cho lần đầu
+				Mode:            OffsetModeCursorBased,
+				InitialValue:    "",       // Cursor rỗng cho lần đầu
 				CursorParamName: "cursor", // Tên parameter trong request
 				CursorExtractor: func(resp *HTTPResponse) (string, bool, error) {
 					// Custom extractor nếu API có format đặc biệt
@@ -182,7 +182,7 @@ func ExampleHTTPPollingConnectorWithCursor() {
 	go func() {
 		for records := range recordsChan {
 			for _, record := range records {
-				fmt.Printf("Received record: %s\n", string(record.Value))
+				fmt.Printf("Received record: %v\n", record.Value)
 				// Produce vào Kafka hoặc xử lý khác
 			}
 		}
@@ -208,9 +208,9 @@ func ExampleHTTPPollingConnectorWithConcurrency() {
 				MaxIdleConns:          100,
 				MaxIdleConnsPerHost:   10,
 				RetryMaxAttempts:      3,
-				MaxConcurrentRequests: 10,  // Cho phép 10 requests đồng thời
-				RequestQueueSize:      100, // Queue size cho requests
-				BatchSize:             50,  // Batch 50 records
+				MaxConcurrentRequests: 10,              // Cho phép 10 requests đồng thời
+				RequestQueueSize:      100,             // Queue size cho requests
+				BatchSize:             50,              // Batch 50 records
 				BatchTimeout:          2 * time.Second, // Flush batch sau 2 giây
 			},
 			OffsetConfig: OffsetConfig{
@@ -219,13 +219,13 @@ func ExampleHTTPPollingConnectorWithConcurrency() {
 				IncrementBy:  1,
 			},
 		},
-		URL:            "https://api.example.com/orders",
-		PollInterval:   5 * time.Second,
+		URL:             "https://api.example.com/orders",
+		PollInterval:    5 * time.Second,
 		ConcurrentPolls: 5, // 5 polls đồng thời
 		RequestBuilder: func(offset Offset) (*HTTPRequest, error) {
 			offsetValue := offset.Value.(int64)
 			url := fmt.Sprintf("https://api.example.com/orders?offset=%d&limit=100", offsetValue)
-			
+
 			return &HTTPRequest{
 				Method: http.MethodGet,
 				URL:    url,
@@ -319,7 +319,7 @@ func ExampleWebhookConnector() {
 	go func() {
 		for records := range connector.GetRecordsChannel() {
 			for _, record := range records {
-				fmt.Printf("Received webhook record: %s\n", string(record.Value))
+				fmt.Printf("Received webhook record: %v\n", record.Value)
 				// Produce vào Kafka hoặc xử lý khác
 			}
 		}
@@ -334,7 +334,7 @@ func ExampleWebhookConnector() {
 
 	// Chạy cho đến khi context bị cancel
 	<-ctx.Done()
-	
+
 	// Dừng connector
 	_ = connector.Stop(ctx)
 }
@@ -371,4 +371,3 @@ func (c *CustomConnector) Stop(ctx context.Context) error {
 	fmt.Printf("Stopping custom connector\n")
 	return nil
 }
-

@@ -5,7 +5,9 @@
 *.out
 
 # Env
+# Env
 .env
+.env.local
 
 # IDE
 .idea/

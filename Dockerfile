@@ -3,7 +3,7 @@
 FROM golang:1.24-alpine AS builder
 
 # Install build dependencies
-RUN apk add --no-cache git make
+RUN apk add --no-cache git make gcc musl-dev
 
 # Set working directory
 WORKDIR /build
@@ -18,9 +18,10 @@ RUN go mod download
 COPY . .
 
 # Build binary với optimizations
-# CGO_ENABLED=0 để tạo static binary
-# -ldflags="-w -s" để giảm binary size
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# CGO_ENABLED=1 bắt buộc cho confluent-kafka-go
+# -tags musl: để build static trên Alpine
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+    -tags musl \
     -ldflags="-w -s -extldflags '-static'" \
     -o pancake_ingest \
     ./cmd/pancake_ingest/

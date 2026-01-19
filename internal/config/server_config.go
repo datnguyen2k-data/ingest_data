@@ -40,9 +40,10 @@ type PostgresConfig struct {
 }
 
 type KafkaConfig struct {
-	Brokers       []string
-	OrderTopic    string
-	ConsumerGroup string
+	Brokers           []string
+	OrderTopic        string
+	ConsumerGroup     string
+	SchemaRegistryURL string
 }
 
 type PancakeConfig struct {
@@ -54,6 +55,9 @@ type PancakeConfig struct {
 }
 
 func Load() (*Config, error) {
+	// Try loading .env.local first (local overrides)
+	_ = godotenv.Load(".env.local")
+	// Then load .env (defaults)
 	_ = godotenv.Load()
 
 	cfg := &Config{
@@ -93,9 +97,10 @@ func Load() (*Config, error) {
 			MaxConns: getEnvAsInt("CHANDO_ECS_MAX_CONNS", 10),
 		},
 		Kafka: KafkaConfig{
-			Brokers:       splitAndTrim(getEnv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")),
-			OrderTopic:    getEnv("KAFKA_ORDER_TOPIC", "orders"),
-			ConsumerGroup: getEnv("KAFKA_CONSUMER_GROUP", "ingest-data"),
+			Brokers:           splitAndTrim(getEnv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")),
+			OrderTopic:        getEnv("KAFKA_ORDER_TOPIC", "orders"),
+			ConsumerGroup:     getEnv("KAFKA_CONSUMER_GROUP", "ingest-data"),
+			SchemaRegistryURL: getEnv("KAFKA_SCHEMA_REGISTRY_URL", "http://localhost:8081"),
 		},
 		Pancake: PancakeConfig{
 			BaseURL:  getEnv("PANCAKE_CHANDO_BASE_URL", "https://pos.pages.fm/api/v1"),

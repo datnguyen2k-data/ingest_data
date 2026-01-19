@@ -170,3 +170,147 @@ func ToPancakeOrderNative(data map[string]interface{}) (map[string]interface{}, 
 
 	return out, nil
 }
+
+// ToPancakeOrderStruct converts a raw JSON map to the specific PancakeOrderStruct
+func ToPancakeOrderStruct(data map[string]interface{}) (*PancakeOrderStruct, error) {
+	out := &PancakeOrderStruct{}
+
+	getString := func(key string) *string {
+		if v, ok := data[key]; ok && v != nil {
+			s := fmt.Sprintf("%v", v)
+			return &s
+		}
+		return nil
+	}
+
+	getFloat := func(key string) *float64 {
+		if v, ok := data[key]; ok && v != nil {
+			var val float64
+			switch t := v.(type) {
+			case float64:
+				val = t
+			case int:
+				val = float64(t)
+			case int64:
+				val = float64(t)
+			default:
+				val = 0.0
+			}
+			return &val
+		}
+		return nil
+	}
+
+	getInt64 := func(key string) *int64 {
+		if v, ok := data[key]; ok && v != nil {
+			var val int64
+			switch t := v.(type) {
+			case float64:
+				val = int64(t)
+			case int:
+				val = int64(t)
+			case int64:
+				val = t
+			}
+			return &val
+		}
+		return nil
+	}
+
+	getBool := func(key string) *bool {
+		if v, ok := data[key]; ok && v != nil {
+			if b, ok := v.(bool); ok {
+				return &b
+			}
+		}
+		return nil
+	}
+
+	out.ID = getString("id")
+	out.ShopID = getInt64("shop_id") // Best effort for shop_id
+	out.BillFullName = getString("bill_full_name")
+	out.BillPhoneNumber = getString("bill_phone_number")
+	out.InsertedAt = getString("inserted_at")
+	out.UpdatedAt = getString("updated_at")
+
+	out.TotalQuantity = getFloat("total_quantity")
+	out.TotalCost = getFloat("total_cost")
+	out.TotalAmount = getFloat("total_amount")
+	out.TotalDiscount = getFloat("total_discount")
+	out.FinalAmount = getFloat("final_amount")
+
+	out.ShippingFee = getFloat("shipping_fee")
+	out.CodFee = getFloat("cod_fee")
+	out.PartnerFee = getFloat("partner_fee")
+
+	out.Status = getString("status")
+	out.IsPreOrder = getBool("is_pre_order")
+	out.Note = getString("note")
+
+	out.BillAddress = getString("bill_address")
+	out.BillDistrict = getString("bill_district_name")
+	out.BillProvince = getString("bill_province_name")
+	out.BillWard = getString("bill_ward_name")
+
+	if v, ok := data["items"]; ok && v != nil {
+		if rawItems, ok := v.([]interface{}); ok {
+			out.Items = make([]OrderItemStruct, 0, len(rawItems))
+			for _, ri := range rawItems {
+				if rMap, ok := ri.(map[string]interface{}); ok {
+					item := OrderItemStruct{
+						ID:            nil,
+						VariationID:   nil,
+						ProductID:     nil,
+						Quantity:      nil,
+						Price:         nil,
+						RetailPrice:   nil,
+						OriginalPrice: nil,
+						Name:          nil,
+						IsCombo:       nil,
+					}
+
+					// Helpers just for item scope
+					getItemString := func(k string) *string {
+						if val, exists := rMap[k]; exists && val != nil {
+							s := fmt.Sprintf("%v", val)
+							return &s
+						}
+						return nil
+					}
+					getItemFloat := func(k string) *float64 {
+						if val, exists := rMap[k]; exists && val != nil {
+							var f float64
+							switch t := val.(type) {
+							case float64:
+								f = t
+							case int:
+								f = float64(t)
+							}
+							return &f
+						}
+						return nil
+					}
+
+					item.ID = getItemString("id")
+					item.VariationID = getItemString("variation_id")
+					item.ProductID = getItemString("product_id")
+					item.Quantity = getItemFloat("quantity")
+					item.Price = getItemFloat("price")
+					item.RetailPrice = getItemFloat("retail_price")
+					item.OriginalPrice = getItemFloat("original_price")
+					item.Name = getItemString("name")
+
+					if val, exists := rMap["is_combo"]; exists && val != nil {
+						if b, ok := val.(bool); ok {
+							item.IsCombo = &b
+						}
+					}
+
+					out.Items = append(out.Items, item)
+				}
+			}
+		}
+	}
+
+	return out, nil
+}

@@ -39,7 +39,7 @@ type SourceTask interface {
 // Record đại diện cho một record được produce vào Kafka
 type Record struct {
 	Key       []byte
-	Value     []byte
+	Value     interface{}
 	Topic     string
 	Partition int32
 	Headers   map[string]string
