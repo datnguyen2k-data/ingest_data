@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ingest_data/internal/config"
+	"ingest_data/internal/infrastructure/encoding/avro"
 	connector "ingest_data/internal/infrastructure/http/connector"
 	kafkaInfra "ingest_data/internal/infrastructure/messaging/kafka"
 	"ingest_data/pkg/logger"
@@ -95,6 +96,12 @@ func main() {
 
 	// Tạo channel để nhận records với buffer lớn cho high throughput
 	recordsChan := make(chan []connector.Record, 1000)
+
+	// Khởi tạo Avro Encoder
+	encoder, err := avro.NewEncoder(avro.PancakeOrderSchema)
+	if err != nil {
+		log.Fatal("Failed to initialize Avro encoder", logger.Error(err))
+	}
 
 	// Tạo connector config
 	connectorConfig := connector.PollingConfig{
@@ -213,8 +220,30 @@ func main() {
 					log.Warn("Invalid JSON in order data, skipping")
 					continue
 				}
+
+				// Unmarshal to map for transformation
+				var rawMap map[string]interface{}
+				if err := json.Unmarshal(item, &rawMap); err != nil {
+					log.Warn("Failed to unmarshal item to map", logger.Error(err))
+					continue
+				}
+
+				// Map to Avro Native format (handling Unions)
+				nativeData, err := avro.ToPancakeOrderNative(rawMap)
+				if err != nil {
+					log.Warn("Failed to map item to Avro native", logger.Error(err))
+					continue
+				}
+
+				// Encode Native to Avro
+				avroBinary, err := encoder.EncodeNative(nativeData)
+				if err != nil {
+					log.Error("Failed to encode order to Avro", logger.Error(err))
+					continue
+				}
+
 				firstBatch = append(firstBatch, connector.Record{
-					Value:     item,
+					Value:     avroBinary,
 					Topic:     cfg.Kafka.OrderTopic,
 					Timestamp: time.Now().UTC(),
 				})
@@ -307,8 +336,30 @@ func main() {
 						if !json.Valid(item) {
 							continue
 						}
+
+						// Unmarshal to map for transformation
+						var rawMap map[string]interface{}
+						if err := json.Unmarshal(item, &rawMap); err != nil {
+							log.Warn("Failed to unmarshal item to map (paged)", logger.Error(err))
+							continue
+						}
+
+						// Map to Avro Native format
+						nativeData, err := avro.ToPancakeOrderNative(rawMap)
+						if err != nil {
+							log.Warn("Failed to map item to Avro native (paged)", logger.Error(err))
+							continue
+						}
+
+						// Encode Native to Avro
+						avroBinary, err := encoder.EncodeNative(nativeData)
+						if err != nil {
+							log.Error("Failed to encode order to Avro (paged)", logger.Error(err))
+							continue
+						}
+
 						batch = append(batch, connector.Record{
-							Value:     item,
+							Value:     avroBinary,
 							Topic:     cfg.Kafka.OrderTopic,
 							Timestamp: time.Now().UTC(),
 						})
